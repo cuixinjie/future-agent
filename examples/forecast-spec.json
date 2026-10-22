@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "distribution": "exclusive_exhaustive",
+  "definition_review": "使用前核对：两个结果指向同一已确认问题、完整窗口及其核验规则；对有效结果互斥且穷尽。",
+  "outcomes": [
+    {"key": "yes", "definition": "在已确认的观察窗口内，按该问题的规则及官方来源出现至少一个新的稳定版本。"},
+    {"key": "no", "definition": "完整观察窗口内，按同一问题的规则及官方来源未出现符合条件的新稳定版本。"}
+  ]
+}

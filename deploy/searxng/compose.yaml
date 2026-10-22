@@ -1,0 +1,21 @@
+name: future-agent-search
+
+services:
+  searxng:
+    image: ghcr.io/searxng/searxng@sha256:5ed0323b5f5f8701264ef65e239a2bd83cb57098f2b971fa30bf79c06eeae271
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    environment:
+      SEARXNG_BASE_URL: http://127.0.0.1:8888/
+    volumes:
+      - ../../data/searxng/config:/etc/searxng
+      - searxng-cache:/var/cache/searxng
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  searxng-cache:

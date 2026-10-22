@@ -1,0 +1,29 @@
+# Python environments, build outputs and checks
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local credentials; only the placeholder template may be committed
+.env
+.env.*
+!.env.example
+
+# Private inputs, databases and downloaded page snapshots
+data/
+private/
+cache/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
