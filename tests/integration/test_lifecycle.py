@@ -15,6 +15,7 @@ from future_agent.application.lifecycle import ResolutionService
 from future_agent.application.ports import AppError, Conflict, NotFound
 from future_agent.domain.contracts import now
 from future_agent.domain.lifecycle import FrozenForecast, ResolutionInput, fingerprint
+from future_agent.forecasting.report import render_report
 from future_agent.storage.sqlite import SQLiteRepository
 
 __all__ = ["context"]
@@ -220,6 +221,8 @@ def test_crash_recovery_keeps_attempts_budget_and_returns_same_result(context, r
     assert len(attempts) == 2 and attempts[0].error_code == "interrupted_cost_unknown"
     assert attempts[0].charged_tokens == crashed.attempts[0].charged_tokens
     assert repo.load(sid).consumed_tokens > crashed.consumed_tokens
+    assert result.attempt_ids == [a.id for a in attempts]
+    assert all(a.forecast_step_id == step_id for a in attempts)
     assert service.resume(step_id) == result and count(repo) == 1
 
 
@@ -290,6 +293,7 @@ def test_atomic_step_completion_failure_rolls_back_forecast_then_explicit_resume
     assert count(repo) == 0 and repo.step(step_id).status == "running"
     service.resume(step_id, retry_interrupted=True)
     assert count(repo) == 1 and repo.step(step_id).status == "completed"
+    assert service.resume(step_id).attempt_ids == [a.id for a in repo.load(sid).attempts]
 
 
 def test_cli_freeze_and_resolution_history_are_cross_process(context, repo, tmp_path):
@@ -364,11 +368,129 @@ service.run(UUID(sys.argv[2]), 1, UUID(sys.argv[3]),
     )
     assert process.returncode == 23, process.stderr.decode(errors="replace")
     assert repo.load(sid).attempts[0].status == "started"
+    assert repo.load(sid).attempts[0].forecast_step_id == step_id
     assert repo.step(step_id).status == "running" and count(repo) == 0
     service = engine(context, FixtureProvider([json.dumps(forecast_response())]))
     result = service.resume(step_id, retry_interrupted=True)
     assert service.resume(step_id) == result and count(repo) == 1
     assert repo.load(sid).attempts[0].error_code == "interrupted_cost_unknown"
+    assert result.attempt_ids == [a.id for a in repo.load(sid).attempts]
+
+
+def test_resumed_step_excludes_intervening_forecast_attempts(context, repo):
+    step_id = uuid4()
+    service, sid = interrupted(context, step_id)
+    interrupted_attempt = repo.load(sid).attempts[0]
+    service.abandon(sid)
+    service.provider = FixtureProvider([json.dumps(forecast_response())] * 2)
+    step = repo.step(step_id)
+    other = service.run(sid, step.revision, step.assessment_id, step.spec)
+    resumed = service.resume(step_id, retry_interrupted=True)
+    attempts = repo.load(sid).attempts
+    assert len(attempts) == 3
+    assert resumed.attempt_ids == [interrupted_attempt.id, attempts[2].id]
+    assert other.attempt_ids == [attempts[1].id]
+    assert not set(resumed.attempt_ids) & set(other.attempt_ids)
+    assert sum(a.charged_tokens for a in attempts) == repo.load(sid).consumed_tokens
+
+
+def test_report_uses_frozen_record_without_changing_draft(context, repo, tmp_path):
+    _, lifecycle, forecast, _ = setup(context)
+    args = ("--no-env", "--data-dir", str(tmp_path), "forecast", "report", str(forecast.id))
+    assert "尚未冻结" in run_cli(*args).stdout
+    original_payload = forecast.model_dump_json()
+    frozen = lifecycle.freeze(forecast.id)
+    result = run_cli(*args)
+    assert result.returncode == 0, result.stderr
+    assert "已冻结" in result.stdout and "尚未冻结" not in result.stdout
+    assert frozen.frozen_at.isoformat() in result.stdout
+    assert frozen.input_hash in result.stdout
+    assert "实验评分资格须另行检查" in result.stdout
+    assert repo.forecast(forecast.id).model_dump_json() == original_payload
+    assert lifecycle.report(forecast.id) == render_report(forecast, frozen=frozen)
+    other = forecast.model_copy(update={"id": uuid4()})
+    with pytest.raises(ValueError, match="不一致"):
+        render_report(other, frozen=frozen)
+
+
+def test_confirmed_fixture_is_identified_in_forecast_report(context):
+    events, _, assessments, sid = context
+    from future_agent.domain.events import EventDraft
+
+    draft = EventDraft.model_validate(
+        events.revision(sid).model_dump(include=EventDraft.model_fields.keys())
+    )
+    events.edit(sid, 1, draft, origin="fixture")
+    events.confirm(sid, 2)
+    assessment = assessments.assess(sid, 3, review())
+    service = engine(context, FixtureProvider([json.dumps(forecast_response())]))
+    forecast = service.run(sid, 3, assessment.id, forecast_spec())
+    assert assessment.experiment
+    assert "离线/夹具许可输入" in render_report(forecast)
+
+
+def test_forecast_rejects_missing_step_attempt_links_atomically(context, repo, monkeypatch):
+    _, _, assessments, sid = context
+    assessment = assessments.assess(sid, 1, review())
+    step_id = uuid4()
+    service = engine(context, FixtureProvider([json.dumps(forecast_response())]))
+    save = repo.save_forecast
+
+    def missing_attempt(forecast, **kwargs):
+        save(forecast.model_copy(update={"attempt_ids": [uuid4()]}), **kwargs)
+
+    monkeypatch.setattr(repo, "save_forecast", missing_attempt)
+    with pytest.raises(Conflict, match="调用归属"):
+        service.run(sid, 1, assessment.id, forecast_spec(), request_id=step_id)
+    assert count(repo) == 0 and repo.step(step_id).status == "running"
+    assert repo.load(sid).status == "FAILED"
+
+
+def test_legacy_session_upgrade_keeps_frozen_payload_and_unknown_ownership(context, repo):
+    _, lifecycle, forecast, _ = setup(context)
+    frozen = lifecycle.freeze(forecast.id)
+    session = repo.load(forecast.session_id)
+    old = session.model_dump(mode="json")
+    old["schema_version"] = "1.3"
+    for attempt in old["attempts"]:
+        attempt["schema_version"] = "1.0"
+        attempt.pop("forecast_step_id")
+    old_payload = json.dumps(old)
+    with repo.engine.begin() as db:
+        db.execute(
+            text("update analysis_sessions set payload=:payload where id=:id"),
+            {"payload": old_payload, "id": str(session.id)},
+        )
+        originals = {
+            table: db.execute(text(f"select payload from {table}")).scalars().all()
+            for table in ("forecasts", "frozen_forecasts")
+        }
+    loaded = repo.load(session.id)
+    assert loaded.schema_version == "1.4" and loaded.attempts[0].forecast_step_id is None
+    with repo.engine.connect() as db:
+        assert db.scalar(text("select payload from analysis_sessions")) == old_payload
+    repo.save(loaded, loaded.version)
+    assert repo.frozen(forecast.id) == frozen
+    with repo.engine.connect() as db:
+        assert originals == {
+            table: db.execute(text(f"select payload from {table}")).scalars().all()
+            for table in originals
+        }
+
+
+def test_legacy_interruption_never_guesses_old_call_ownership(context, repo):
+    step_id = uuid4()
+    service, sid = interrupted(context, step_id)
+    session = repo.load(sid)
+    old_attempt = session.attempts[0].model_copy(update={"forecast_step_id": None})
+    repo.save(session.model_copy(update={"attempts": [old_attempt]}), session.version)
+    service.provider = FixtureProvider([json.dumps(forecast_response())])
+    result = service.resume(step_id, retry_interrupted=True)
+    attempts = repo.load(sid).attempts
+    assert attempts[0].forecast_step_id is None
+    assert attempts[0].charged_tokens == old_attempt.charged_tokens
+    assert result.attempt_ids == [attempts[1].id]
+    assert repo.load(sid).consumed_tokens == sum(a.charged_tokens for a in attempts)
 
 
 def test_t10_upgrade_preserves_actual_t09_forecast_and_old_session_payload(context, repo, tmp_path):
@@ -413,7 +535,7 @@ def test_t10_upgrade_preserves_actual_t09_forecast_and_old_session_payload(conte
                 table: conn.execute(text(f"select * from {table}")).all() for table in tables
             } == before
         assert old.forecast(forecast.id) == forecast
-        assert old.load(forecast.session_id).schema_version == "1.3"
+        assert old.load(forecast.session_id).schema_version == "1.4"
         assert old.load(forecast.session_id).active_forecast_step_id is None
         assert (
             old.seal(

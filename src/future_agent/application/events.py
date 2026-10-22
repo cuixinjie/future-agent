@@ -130,6 +130,9 @@ class EventService:
     ) -> AnalysisSession:
         if session.current_revision != expected_revision:
             raise Conflict("事件版本冲突，请重新读取当前档案")
+        fixture_input = origin == "fixture" or any(
+            item.origin == "fixture" for item in self.repository.history(session.id)
+        )
         if origin == "model" and session.current_revision:
             previous = self.repository.revision(session.id, session.current_revision)
             kept = [item for item in previous.unknowns if item.resolution_status == "kept_unknown"]
@@ -162,7 +165,7 @@ class EventService:
                 "id": revision_id,
                 "session_id": session.id,
                 "revision": session.current_revision + 1,
-                "origin": origin,
+                "origin": "fixture" if fixture_input else origin,
                 "confirmed": confirmed,
                 "semantic_review": "user_confirmed" if confirmed else "pending_user_review",
                 "model_id": self.provider.model_id if origin == "model" and self.provider else None,

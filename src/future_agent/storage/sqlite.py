@@ -87,6 +87,12 @@ class SQLiteRepository:
                         or active.current_revision != forecast.event.revision
                     ):
                         raise Conflict("保存预测时会话已变化")
+                    if step is not None and (
+                        active.active_forecast_step_id != step.id
+                        or forecast.attempt_ids
+                        != [a.id for a in active.attempts if a.forecast_step_id == step.id]
+                    ):
+                        raise Conflict("预测调用归属与执行步骤不一致")
                     completed = transition(active, "STRUCTURED").model_copy(
                         update={
                             "version": active.version + 1,

@@ -81,6 +81,17 @@ def test_complete_flow_sources_dedup_citations_and_versions(setup, repo):
         service.start(sid, 2, "Example", "release")
 
 
+def test_confirmed_fixture_marks_research_and_sources_without_extra_flag(setup, repo):
+    sid, service, evidence, _, _ = setup
+    events = EventService(repo)
+    events.edit(sid, 2, EventDraft(question=complete_question()), origin="fixture")
+    events.confirm(sid, 3)
+    run = service.start(sid, 4, "Example", "release")
+    assert run.origin == "fixture" and run.status == "completed"
+    assert all(d.source.origin == "fixture" for d in evidence.list_documents(sid, 4))
+    assert not any(item.eligible for item in evidence.select(sid, 4, now()))
+
+
 def test_no_search_config_does_not_create_fake_run(setup):
     sid, service, _, search, _ = setup
     service.search = None
@@ -315,7 +326,7 @@ def test_legacy_session_upgrades_without_resetting_model_budget(setup, repo):
     data["consumed_seconds"] = 42
     data["consumed_tokens"] = 12345
     restored = AnalysisSession.model_validate(data)
-    assert restored.schema_version == "1.3" and restored.research_runs == []
+    assert restored.schema_version == "1.4" and restored.research_runs == []
     assert restored.consumed_seconds == 42 and restored.consumed_tokens == 12345
 
 

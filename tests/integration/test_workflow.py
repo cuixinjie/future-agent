@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from conftest import NARRATIVE, FixtureProvider, complete_question, make_draft
@@ -21,6 +22,7 @@ def test_read_clarify_edit_confirm_and_restart(repo):
     assert read.status == "NEEDS_INPUT"
     assert len(read.pending_questions) <= 3
     assert read.attempts[0].input_tokens == 100
+    assert read.attempts[0].forecast_step_id is None
     first = repo.revision(session.id, 1)
     assert first.model_id == provider.model_id and first.prompt_version == "reader-1.0"
     with pytest.raises(ValueError):
@@ -219,3 +221,41 @@ def test_retry_after_longer_than_budget_does_not_sleep(repo):
     with pytest.raises(ModelError):
         service.read(session.id)
     assert delays == [] and len(repo.load(session.id).attempts) == 1
+
+
+@pytest.mark.parametrize("operation", ["confirm", "answer", "edit", "read"])
+def test_fixture_origin_survives_dossier_revisions(repo, operation):
+    service = EventService(repo)
+    session = service.create(NARRATIVE)
+    draft = make_draft(session.sources[0]).model_copy(update={"question": complete_question()})
+    service.edit(session.id, 0, draft, origin="fixture")
+    original = repo.revision(session.id, 1)
+    if operation == "confirm":
+        service.confirm(session.id, 1)
+    elif operation == "answer":
+        service.answer(session.id, 1, "补充夹具信息")
+    elif operation == "edit":
+        service.edit(session.id, 1, draft)
+    else:
+        EventService(repo, FixtureProvider([draft.model_dump_json()])).read(session.id, force=True)
+    assert repo.revision(session.id, 2).origin == "fixture"
+    assert repo.revision(session.id, 1) == original
+    if operation == "read":
+        assert repo.revision(session.id, 2).model_id == FixtureProvider.model_id
+
+
+def test_fixture_history_survives_a_legacy_manual_revision(repo):
+    service = EventService(repo)
+    session = service.create(NARRATIVE)
+    draft = make_draft(session.sources[0]).model_copy(update={"question": complete_question()})
+    service.edit(session.id, 0, draft, origin="fixture")
+    # Persist the shape of the pre-fix confirm bug without changing its old record later.
+    previous = repo.revision(session.id, 1)
+    legacy = previous.model_copy(
+        update={"id": uuid4(), "revision": 2, "origin": "manual", "question": None}
+    )
+    active = repo.load(session.id)
+    repo.save(active.model_copy(update={"current_revision": 2}), active.version, legacy)
+    service.edit(session.id, 2, draft, confirmed=True)
+    assert repo.revision(session.id, 3).origin == "fixture"
+    assert repo.revision(session.id, 2) == legacy

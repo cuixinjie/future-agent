@@ -5,7 +5,7 @@ from uuid import UUID
 
 from future_agent.application.evidence import EvidenceService
 from future_agent.application.forecasts import ForecastRepository
-from future_agent.application.ports import Conflict
+from future_agent.application.ports import Conflict, NotFound
 from future_agent.domain.contracts import now
 from future_agent.domain.lifecycle import (
     FrozenForecast,
@@ -15,6 +15,7 @@ from future_agent.domain.lifecycle import (
     validate_resolution,
     validate_supersession,
 )
+from future_agent.forecasting.report import render_report
 
 
 class LifecycleRepository(Protocol):
@@ -32,6 +33,13 @@ class ResolutionService:
         evidence: EvidenceService,
     ) -> None:
         self.forecasts, self.repository, self.evidence = forecasts, repository, evidence
+
+    def report(self, forecast_id: UUID) -> str:
+        try:
+            frozen = self.repository.frozen(forecast_id)
+        except NotFound:
+            return render_report(self.forecasts.forecast(forecast_id))
+        return render_report(frozen.forecast, frozen=frozen)
 
     def freeze(
         self,

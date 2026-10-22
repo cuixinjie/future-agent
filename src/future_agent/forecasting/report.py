@@ -1,13 +1,18 @@
 """Deterministic report: every value comes from the saved structured forecast."""
 
 from future_agent.domain.forecasts import Forecast
+from future_agent.domain.lifecycle import FrozenForecast
 
 
-def render_report(forecast: Forecast) -> str:
+def render_report(forecast: Forecast, *, frozen: FrozenForecast | None = None) -> str:
+    if frozen is not None and frozen.forecast != forecast:
+        raise ValueError("冻结记录与报告预测不一致")
     question = forecast.event.question
     assert question is not None
     lines = [
-        "预测报告（草稿，尚未冻结，不用于实验评分）",
+        "预测报告（已冻结；实验评分资格须另行检查）"
+        if frozen is not None
+        else "预测报告（草稿，尚未冻结，不用于实验评分）",
         f"预测ID：{forecast.id}",
         f"问题：{question.question}",
         f"窗口：{question.window_start.isoformat()} 至 {question.window_end.isoformat()}",
@@ -22,6 +27,10 @@ def render_report(forecast: Forecast) -> str:
         f"模型：{forecast.model_id}；提示词：{forecast.prompt_version}",
         f"结果定义审查：{forecast.spec.definition_review}",
     ]
+    if frozen is not None:
+        lines.extend(
+            [f"冻结时间：{frozen.frozen_at.isoformat()}", f"冻结内容 SHA256：{frozen.input_hash}"]
+        )
     if not forecast.assessment.experiment or forecast.event.origin == "fixture":
         lines.append("离线/夹具许可输入：不代表真实实验或服务能力。")
     if forecast.draft.refusal_reason:

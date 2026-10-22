@@ -64,7 +64,13 @@ class ModelCalls:
                 self._fail(session, "budget_exhausted")
                 raise AppError("模型调用预算已耗尽；历史调用和错误已保存")
             timeout = min(CALL_TIMEOUT_SECONDS, remaining)
-            attempt = CallAttempt(reserved_tokens=token_allowance, charged_tokens=token_allowance)
+            attempt = CallAttempt(
+                forecast_step_id=session.active_forecast_step_id
+                if session.status == "FORECASTING"
+                else None,
+                reserved_tokens=token_allowance,
+                charged_tokens=token_allowance,
+            )
             # Reserve time before I/O: a crashed process cannot silently reset its budget.
             session = self._save(
                 session.model_copy(

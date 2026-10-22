@@ -26,7 +26,6 @@ from future_agent.domain.evidence import EvidenceImport, EvidenceSpan
 from future_agent.domain.forecasts import Forecast, ForecastDraft, ForecastSpec
 from future_agent.domain.lifecycle import ForecastStep, FrozenForecast, Resolution, ResolutionInput
 from future_agent.domain.protocols import EvaluationProtocol, ReleaseProject, release_question
-from future_agent.forecasting.report import render_report
 from future_agent.providers.compatible import CompatibleProvider
 from future_agent.providers.materials import JsonMaterialImporter
 from future_agent.providers.searxng import SearXNGProvider
@@ -455,11 +454,10 @@ def main() -> int:
                 forecasts.abandon(args.session_id)
                 emit({"status": "abandoned", "cost": None})
             else:
-                result = forecasts.get(args.forecast_id)
                 if args.operation == "report":
-                    print(render_report(result), end="")
+                    print(lifecycle.report(args.forecast_id), end="")
                 else:
-                    emit(result)
+                    emit(forecasts.get(args.forecast_id))
             return 0
         if args.command == "assessment":
             evidence = EvidenceService(repo, repo, FileSnapshotStore(settings.data_dir))

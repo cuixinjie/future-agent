@@ -189,7 +189,17 @@ class EventRevision(EventDraft):
 
 
 class CallAttempt(Contract):
+    schema_version: Literal["1.1"] = "1.1"
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_v1(cls, value: object) -> object:
+        if isinstance(value, dict) and value.get("schema_version") == "1.0":
+            return {**value, "schema_version": "1.1"}
+        return value
+
     id: UUID = Field(default_factory=uuid4)
+    forecast_step_id: UUID | None = None
     started_at: UtcTime = Field(default_factory=now)
     status: Literal["started", "succeeded", "failed"] = "started"
     error_code: str | None = None
@@ -205,13 +215,13 @@ SessionStatus = Literal["CREATED", "READING", "FORECASTING", "NEEDS_INPUT", "STR
 
 
 class AnalysisSession(Contract):
-    schema_version: Literal["1.3"] = "1.3"
+    schema_version: Literal["1.4"] = "1.4"
 
     @model_validator(mode="before")
     @classmethod
     def upgrade_v1(cls, value: object) -> object:
-        if isinstance(value, dict) and value.get("schema_version") in {"1.0", "1.1", "1.2"}:
-            return {**value, "schema_version": "1.3"}
+        if isinstance(value, dict) and value.get("schema_version") in {"1.0", "1.1", "1.2", "1.3"}:
+            return {**value, "schema_version": "1.4"}
         return value
 
     id: UUID = Field(default_factory=uuid4)

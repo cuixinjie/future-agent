@@ -153,7 +153,6 @@ class ForecastService:
             ),
             session.version,
         )
-        attempt_offset = len(active.attempts)
 
         def validate(content: str) -> ForecastDraft:
             draft = ForecastDraft.model_validate_json(content)
@@ -191,7 +190,7 @@ class ForecastService:
                 evidence_cutoff=assessment.cutoff,
                 evidence_documents=documents,
                 evidence_spans=spans,
-                attempt_ids=[a.id for a in active.attempts[attempt_offset:]],
+                attempt_ids=[a.id for a in active.attempts if a.forecast_step_id == step.id],
                 draft=draft,
                 probabilities=probabilities,
                 normalization_original_sum=original_sum,

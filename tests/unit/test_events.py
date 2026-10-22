@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from future_agent.application.events import questions
 from future_agent.domain.events import (
     AnalysisSession,
+    CallAttempt,
     Claim,
     EventDraft,
     ForecastQuestion,
@@ -116,3 +117,22 @@ def test_programmatic_state_transitions():
     with pytest.raises(ValueError, match="非法状态"):
         transition(session, "FAILED")
     assert transition(session, "READING").status == "READING"
+
+
+@pytest.mark.parametrize("version", ["1.0", "1.1", "1.2", "1.3"])
+def test_legacy_session_call_ownership_remains_unknown(version):
+    session = AnalysisSession(
+        sources=[SourceText.from_raw("旧叙述")],
+        request_fingerprint="legacy",
+        attempts=[CallAttempt(charged_tokens=123, status="failed")],
+        consumed_tokens=123,
+    )
+    data = session.model_dump(mode="json")
+    data["schema_version"] = version
+    data["attempts"][0]["schema_version"] = "1.0"
+    data["attempts"][0].pop("forecast_step_id")
+    restored = AnalysisSession.model_validate(data)
+    assert restored.schema_version == "1.4"
+    assert restored.attempts[0].schema_version == "1.1"
+    assert restored.attempts[0].forecast_step_id is None
+    assert restored.consumed_tokens == restored.attempts[0].charged_tokens == 123
