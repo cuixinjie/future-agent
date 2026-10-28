@@ -24,10 +24,12 @@ def test_method_gates(target, current, critical, numeric, expected):
     )
     assert result[0].data_eligible == target
     assert result[1].data_eligible == expected
-    assert not any(m.data_eligible for m in result[2:])
+    assert not any(m.data_eligible for m in result[2:4])
     assert all(m.implemented for m in result[:2])
-    assert not any(m.implemented for m in result[2:])
-    assert all("not_implemented" in m.reasons for m in result[2:])
+    assert not any(m.implemented for m in result[2:4])
+    assert all("not_implemented" in m.reasons for m in result[2:4])
+    assert result[4].implemented and not result[4].data_eligible
+    assert "release_history_not_validated" in result[4].reasons
 
 
 def test_review_rejects_duplicate_and_excess_questions():

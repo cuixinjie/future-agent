@@ -132,7 +132,7 @@ def test_legacy_session_call_ownership_remains_unknown(version):
     data["attempts"][0]["schema_version"] = "1.0"
     data["attempts"][0].pop("forecast_step_id")
     restored = AnalysisSession.model_validate(data)
-    assert restored.schema_version == "1.4"
+    assert restored.schema_version == "1.5"
     assert restored.attempts[0].schema_version == "1.1"
     assert restored.attempts[0].forecast_step_id is None
     assert restored.consumed_tokens == restored.attempts[0].charged_tokens == 123

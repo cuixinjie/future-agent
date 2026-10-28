@@ -83,3 +83,10 @@ class ForecastStepRow(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("analysis_sessions.id"))
     version: Mapped[int] = mapped_column(Integer)
     payload: Mapped[str] = mapped_column(Text)
+
+
+class EvaluationRunRow(Base):
+    __tablename__ = "evaluation_runs"
+    id: Mapped[str] = mapped_column(ForeignKey("evaluation_protocols.id"), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[str] = mapped_column(Text)

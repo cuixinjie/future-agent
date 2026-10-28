@@ -1,0 +1,75 @@
+{
+  "id": "33333333-3333-4333-8333-333333333333",
+  "purpose": "fixture",
+  "selection_source": "离线演示项目清单，不是真实预登记",
+  "sampling_method": "仅用于验证协议保存和锁定，不用于预测效果结论",
+  "projects": [
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Fixture Software",
+      "official_url": "https://fixture.example/",
+      "product_channel": "示例主产品稳定通道",
+      "stable_version_rule": "示例 v主.次.补丁；排除 draft、alpha、beta、RC、nightly 和 dev；补丁版计入",
+      "official_resolution_source": "https://fixture.example/releases",
+      "publication_time_rule": "官方发布页公开发布时间（UTC），不使用提交时间",
+      "component_branch_rule": "仅主产品 main 维护分支；其余组件和维护分支排除",
+      "history_complete_windows": 12,
+      "history_source": "https://fixture.example/releases",
+      "history_coverage_statement": "离线夹具声明12个完整30天窗口；不是实际采集或核验结果"
+    }
+  ],
+  "exclusions": [
+    {
+      "name": "Excluded Fixture",
+      "reason": "缺少完整发布记录"
+    }
+  ],
+  "batch_id": "t11-offline-fixture-2099",
+  "evidence_cutoff": "2099-01-01T00:00:00Z",
+  "forecast_at": "2099-01-01T01:00:00Z",
+  "snapshot_policy": "Tc封存；仅接受Tc前已获取的资料，旧发布日期不等于历史快照；禁止读入Tc后材料",
+  "shared_input_policy": "A/B/C共用项目身份、官方地址和历史发布快照；B/C共享澄清答案，B不接收C档案与研究结论；C仅读取合格截止快照",
+  "methods": [
+    {
+      "arm": "A",
+      "method_version": "release-frequency-1.0",
+      "prompt_version": null,
+      "final_output_tokens": 4000
+    },
+    {
+      "arm": "B",
+      "method_version": "direct-1.0",
+      "model_id": "offline-fixture-not-a-real-model",
+      "prompt_version": "direct-1.0",
+      "final_output_tokens": 4000
+    },
+    {
+      "arm": "C",
+      "method_version": "judgment-1.0",
+      "model_id": "offline-fixture-not-a-real-model",
+      "prompt_version": "forecast-1.0",
+      "final_output_tokens": 4000
+    }
+  ],
+  "budget": {
+    "max_llm_calls_per_project": 12,
+    "max_search_queries_per_project": 8,
+    "max_pages_per_project": 16,
+    "max_seconds_per_project": 600,
+    "max_tokens_per_project": 1000000,
+    "max_cost": null
+  },
+  "metrics": [
+    "brier",
+    "paired_C-A",
+    "paired_C-B",
+    "coverage",
+    "cost",
+    "latency",
+    "citation_errors",
+    "fact_omissions",
+    "scenario_rate"
+  ],
+  "missing_policy": "所有预登记条目保留；失败、拒绝、迟交及缺失逐条记录；概率缺失不补0或0.5，不计算该条Brier；结果未知保持pending，冲突disputed，规则不可用void",
+  "analysis_plan": "仅对符合规则的resolved首次预测评分，报告配对共同子集、各组覆盖率和排除原因；更新另行评估，后续批次时间前推；固定方法，不按测试结果调参；价格未知留空。样本不足不得声称已校准。"
+}

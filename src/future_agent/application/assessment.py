@@ -12,6 +12,7 @@ from future_agent.domain.assessment import (
     AssessmentReview,
     AssessmentView,
     EvidenceAssessment,
+    MethodQualification,
     ResearchCondition,
     qualify_methods,
 )
@@ -87,6 +88,21 @@ class AssessmentService:
             critical_unknowns=bool(review.critical_questions),
             allow_numeric=review.allow_numeric,
         )
+        if review.numeric_basis is not None:
+            if experiment:
+                raise AppError("自动主观判断资格仅用于普通分析，不能改变旧实验规则")
+            basis = review.numeric_basis
+            supported = basis.status == "supported" and review.allow_numeric
+            if basis.source_kind == "external" and not review.evidence:
+                supported = False
+            if basis.source_kind == "user_report" and not event.claims:
+                supported = False
+            methods[1] = MethodQualification(
+                method="llm_judgment",
+                data_eligible=supported,
+                implemented=True,
+                reasons=[] if supported else ["judgment_basis_insufficient_or_conditional"],
+            )
         gaps = []
         for condition in conditions:
             if condition.status != "completed":
@@ -101,6 +117,7 @@ class AssessmentService:
         if unknowns:
             gaps.append("current_unknowns_preserved")
         assessment = EvidenceAssessment(
+            assessor_version="evidence-assessor-2.0" if review.numeric_basis else ASSESSOR_VERSION,
             session_id=sid,
             event_revision_id=event.id,
             revision=revision,
@@ -117,10 +134,14 @@ class AssessmentService:
             methods=methods,
             recommended_method="llm_judgment" if methods[1].data_eligible else "scenario_only",
             available_methods=[m.method for m in methods if m.data_eligible and m.implemented],
-            status="needs_input" if review.critical_questions else "assessed",
+            status="needs_input"
+            if review.critical_questions and not review.numeric_basis
+            else "assessed",
             gaps=gaps,
             limitations=[
-                "引用相关性由显式人工审查提供；可引用不等于事实已核实。",
+                "引用相关性由模型分析并经程序校验引用；不等于事实已核实。"
+                if review.review_origin == "model"
+                else "引用相关性由显式人工审查提供；可引用不等于事实已核实。",
                 "不推断资料统计口径或样本完整性；未接入合格数据集和时间序列。",
                 "情景及主观判断可执行；统计估计、校准和预测效果尚未验证。",
                 *review.limitations,
@@ -142,7 +163,10 @@ class AssessmentService:
         views = []
         for assessment in self.repository.assessments(event.id):
             reasons = []
-            if assessment.assessor_version != ASSESSOR_VERSION:
+            expected_version = (
+                "evidence-assessor-2.0" if assessment.review.numeric_basis else ASSESSOR_VERSION
+            )
+            if assessment.assessor_version != expected_version:
                 reasons.append("assessor_version_changed")
             if revision != session.current_revision:
                 reasons.append("event_revision_changed")

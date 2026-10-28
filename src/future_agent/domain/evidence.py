@@ -109,6 +109,7 @@ class EvidenceDocument(Contract):
     imported_at: UtcTime = Field(default_factory=now)
     content_hash: Text | None = None
     snapshot_id: UUID | None = None
+    derived_from: UUID | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def consistent(self) -> Self:

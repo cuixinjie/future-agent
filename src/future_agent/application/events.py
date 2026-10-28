@@ -56,6 +56,9 @@ class EventService:
     def get(self, session_id: UUID) -> AnalysisSession:
         return self.repository.load(session_id)
 
+    def list_sessions(self) -> list[AnalysisSession]:
+        return self.repository.list_sessions()
+
     def revision(self, session_id: UUID, number: int | None = None) -> EventRevision:
         session = self.get(session_id)
         selected = session.current_revision if number is None else number
@@ -111,13 +114,21 @@ class EventService:
         *,
         origin: str = "manual",
         confirmed: bool = False,
+        system_reviewed: bool = False,
     ) -> AnalysisSession:
         session = self.repository.load(session_id)
         if session.status in {"READING", "FORECASTING"} or any(
             r.status == "running" for r in session.research_runs
         ):
             raise Conflict("读取执行中，不能编辑；中断后先显式恢复")
-        return self._append(session, expected_revision, draft, origin=origin, confirmed=confirmed)
+        return self._append(
+            session,
+            expected_revision,
+            draft,
+            origin=origin,
+            confirmed=confirmed,
+            system_reviewed=system_reviewed,
+        )
 
     def _append(
         self,
@@ -127,6 +138,7 @@ class EventService:
         *,
         origin: str,
         confirmed: bool = False,
+        system_reviewed: bool = False,
     ) -> AnalysisSession:
         if session.current_revision != expected_revision:
             raise Conflict("事件版本冲突，请重新读取当前档案")
@@ -167,7 +179,9 @@ class EventService:
                 "revision": session.current_revision + 1,
                 "origin": "fixture" if fixture_input else origin,
                 "confirmed": confirmed,
-                "semantic_review": "user_confirmed" if confirmed else "pending_user_review",
+                "semantic_review": ("system_reviewed" if system_reviewed else "user_confirmed")
+                if confirmed
+                else "pending_user_review",
                 "model_id": self.provider.model_id if origin == "model" and self.provider else None,
                 "prompt_version": READER_VERSION if origin == "model" else None,
             }
@@ -245,6 +259,7 @@ class EventService:
         *,
         force: bool = False,
         retry_interrupted: bool = False,
+        progress: Callable[[str], None] = lambda _: None,
     ) -> AnalysisSession:
         if self.provider is None:
             raise AppError("未配置模型。请配置服务，或显式使用 edit 导入人工档案")
@@ -258,22 +273,7 @@ class EventService:
                 raise AppError(
                     "上次读取可能中断且费用未知；检查后使用 --retry-interrupted 显式恢复"
                 )
-            attempts = [
-                attempt.model_copy(
-                    update={"status": "failed", "error_code": "interrupted_cost_unknown"}
-                )
-                if attempt.status == "started"
-                else attempt
-                for attempt in session.attempts
-            ]
-            session = self._save(
-                transition(session, "FAILED").model_copy(
-                    update={
-                        "attempts": attempts,
-                        "error_code": "interrupted_cost_unknown",
-                    }
-                )
-            )
+            session = self.abandon_read(session_id)
         elif session.current_revision and not force:
             return session
         session = self._save(transition(session, "READING"))
@@ -292,8 +292,30 @@ class EventService:
             base_user,
             EventDraft.model_json_schema(),
             lambda content: self._validate_reader(session, content),
+            progress=progress,
         )
         return self._append(session, session.current_revision, draft, origin="model")
+
+    def abandon_read(self, session_id: UUID) -> AnalysisSession:
+        session = self.get(session_id)
+        if session.status != "READING":
+            raise Conflict("没有执行中的读取")
+        attempts = [
+            attempt.model_copy(
+                update={"status": "failed", "error_code": "interrupted_cost_unknown"}
+            )
+            if attempt.status == "started"
+            else attempt
+            for attempt in session.attempts
+        ]
+        return self._save(
+            transition(session, "FAILED").model_copy(
+                update={
+                    "attempts": attempts,
+                    "error_code": "interrupted_cost_unknown",
+                }
+            )
+        )
 
     def _validate_reader(self, session: AnalysisSession, content: str) -> EventDraft:
         draft = EventDraft.model_validate_json(content)

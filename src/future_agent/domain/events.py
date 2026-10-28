@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 from pydantic import Field, model_validator
 
+from future_agent.domain.assistance import AssistanceState
 from future_agent.domain.contracts import Contract as Contract
 from future_agent.domain.contracts import Text as Text
 from future_agent.domain.contracts import UtcTime as UtcTime
@@ -175,7 +176,9 @@ class EventRevision(EventDraft):
     model_id: str | None = None
     prompt_version: str | None = None
     confirmed: bool = False
-    semantic_review: Literal["pending_user_review", "user_confirmed"] = "pending_user_review"
+    semantic_review: Literal["pending_user_review", "user_confirmed", "system_reviewed"] = (
+        "pending_user_review"
+    )
 
     @model_validator(mode="after")
     def consistent_confirmation(self) -> Self:
@@ -183,7 +186,7 @@ class EventRevision(EventDraft):
             raise ValueError("预测问题必须绑定当前事件版本")
         if self.confirmed and (not self.question or self.question.missing()):
             raise ValueError("预测问题不完整，不能确认")
-        if self.confirmed != (self.semantic_review == "user_confirmed"):
+        if self.confirmed != (self.semantic_review != "pending_user_review"):
             raise ValueError("确认状态与人工语义审查状态不一致")
         return self
 
@@ -215,13 +218,19 @@ SessionStatus = Literal["CREATED", "READING", "FORECASTING", "NEEDS_INPUT", "STR
 
 
 class AnalysisSession(Contract):
-    schema_version: Literal["1.4"] = "1.4"
+    schema_version: Literal["1.5"] = "1.5"
 
     @model_validator(mode="before")
     @classmethod
     def upgrade_v1(cls, value: object) -> object:
-        if isinstance(value, dict) and value.get("schema_version") in {"1.0", "1.1", "1.2", "1.3"}:
-            return {**value, "schema_version": "1.4"}
+        if isinstance(value, dict) and value.get("schema_version") in {
+            "1.0",
+            "1.1",
+            "1.2",
+            "1.3",
+            "1.4",
+        }:
+            return {**value, "schema_version": "1.5"}
         return value
 
     id: UUID = Field(default_factory=uuid4)
@@ -244,6 +253,7 @@ class AnalysisSession(Contract):
     error_code: str | None = None
     request_key: str | None = None
     request_fingerprint: str
+    assistance: AssistanceState | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {

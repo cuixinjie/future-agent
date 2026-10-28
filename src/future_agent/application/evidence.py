@@ -1,7 +1,7 @@
 """Evidence import, citation validation and cutoff selection through narrow ports."""
 
 from typing import Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from future_agent.application.ports import AppError, SessionRepository
 from future_agent.domain.events import UtcTime, now, utc
@@ -107,6 +107,26 @@ class EvidenceService:
     def list_documents(self, session_id: UUID, revision: int) -> list[EvidenceDocument]:
         event = self.sessions.revision(session_id, revision)
         return self.repository.documents(event.id)
+
+    def link_revision(
+        self, session_id: UUID, old_revision: int, new_revision: int
+    ) -> dict[UUID, UUID]:
+        """Link preserved acquisition snapshots to a new target revision without refetching."""
+        event = self.sessions.revision(session_id, new_revision)
+        linked = {}
+        for document in self.list_documents(session_id, old_revision):
+            if document.snapshot_id is not None:
+                self.snapshot(document.id)
+            copied = document.model_copy(
+                update={
+                    "id": uuid4(),
+                    "event_revision_id": event.id,
+                    "derived_from": document.id,
+                }
+            )
+            self.repository.save_document(copied)
+            linked[document.id] = copied.id
+        return linked
 
     def select(
         self,

@@ -5,15 +5,18 @@ from uuid import UUID, uuid4
 
 from pydantic import Field, model_validator
 
+from future_agent.domain.assistance import NumericBasis
 from future_agent.domain.contracts import Contract, Text, UtcTime, now
 from future_agent.domain.evidence import EvidenceEligibility
 
-ASSESSOR_VERSION = "evidence-assessor-1.1"
+ASSESSOR_VERSION = "evidence-assessor-1.2"
 Method = Literal[
     "scenario_only", "llm_judgment", "reference_class", "time_series", "release_frequency_baseline"
 ]
-# Register only executable engines; statistical methods remain unavailable.
-IMPLEMENTED_METHODS: frozenset[Method] = frozenset({"scenario_only", "llm_judgment"})
+# The release baseline is executable only through the experiment service.
+IMPLEMENTED_METHODS: frozenset[Method] = frozenset(
+    {"scenario_only", "llm_judgment", "release_frequency_baseline"}
+)
 
 
 class ReviewedEvidence(Contract):
@@ -28,6 +31,10 @@ class AssessmentReview(Contract):
     critical_questions: list[Text] = Field(default_factory=list, max_length=3)
     limitations: list[Text] = Field(default_factory=list)
     allow_numeric: bool = False
+    numeric_basis: NumericBasis | None = Field(default=None, exclude_if=lambda value: value is None)
+    review_origin: Literal["model"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def unique_evidence(self) -> Self:
@@ -92,7 +99,12 @@ class EvidenceAssessment(Contract):
     created_at: UtcTime = Field(default_factory=now)
     cutoff: UtcTime
     experiment: bool
-    assessor_version: Literal["evidence-assessor-1.0", "evidence-assessor-1.1"] = ASSESSOR_VERSION
+    assessor_version: Literal[
+        "evidence-assessor-1.0",
+        "evidence-assessor-1.1",
+        "evidence-assessor-1.2",
+        "evidence-assessor-2.0",
+    ] = ASSESSOR_VERSION
     input_hash: Text
     review: AssessmentReview
     research_conditions: list[ResearchCondition]

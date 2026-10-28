@@ -1,4 +1,4 @@
-"""CLI protocol conversion and composition root for M1 application services."""
+"""CLI protocol conversion and composition root for shared application services."""
 
 import argparse
 import json
@@ -12,15 +12,21 @@ from pydantic import BaseModel, TypeAdapter, ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from future_agent.application.assessment import AssessmentService
+from future_agent.application.assistance import AssistanceService
+from future_agent.application.evaluation import EvaluationService
+from future_agent.application.evaluation_report import evaluation_report
 from future_agent.application.events import EventService
 from future_agent.application.evidence import EvidenceService
 from future_agent.application.forecasts import ForecastService
 from future_agent.application.lifecycle import ResolutionService
 from future_agent.application.ports import AppError, LLMProvider
 from future_agent.application.protocols import ProtocolService
+from future_agent.application.report_export import ReportExportService
 from future_agent.application.research import ResearchService, SearchPlanner
+from future_agent.chat import Chat
 from future_agent.config import Settings, load_settings
 from future_agent.domain.assessment import AssessmentReview, EvidenceAssessment
+from future_agent.domain.evaluation import EvaluationReview, EvaluationRun, SealInput
 from future_agent.domain.events import EventDraft, EventRevision, UtcTime
 from future_agent.domain.evidence import EvidenceImport, EvidenceSpan
 from future_agent.domain.forecasts import Forecast, ForecastDraft, ForecastSpec
@@ -30,6 +36,7 @@ from future_agent.providers.compatible import CompatibleProvider
 from future_agent.providers.materials import JsonMaterialImporter
 from future_agent.providers.searxng import SearXNGProvider
 from future_agent.providers.web import StaticPageReader
+from future_agent.storage.reports import FileReportStore
 from future_agent.storage.snapshots import FileSnapshotStore
 from future_agent.storage.sqlite import SQLiteRepository
 
@@ -54,13 +61,16 @@ def event_draft(revision: EventRevision) -> EventDraft:
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="future-agent",
-        description="预测未来智能体：M1 事件档案、实验协议及 M2 证据检索。",
+        description="预测未来智能体：自动研究与判断、证据追溯、冻结核验及实验评分。",
         epilog="模型读取和预测会发送档案及引用；research run 将公开对象和主题发往搜索服务。",
     )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--no-env", action="store_true", help="不读取 .env（仍读取进程环境变量）")
     parser.add_argument("--data-dir", type=Path, help="批准的本地数据目录")
     commands = parser.add_subparsers(dest="command")
+    chat = commands.add_parser("chat", help="M5 交互式预测助手：会话、审查、报告及核验")
+    chat.add_argument("--resume", type=UUID, help="打开已有会话；不自动重发请求")
+    chat.add_argument("--manual", action="store_true", help="使用原高级人工审查流程")
     doctor_command = commands.add_parser("doctor", help="配置诊断；默认不联网")
     doctor_command.add_argument(
         "--live", action="store_true", help="最多两次真实模型调用，可能产生费用"
@@ -82,6 +92,9 @@ def make_parser() -> argparse.ArgumentParser:
             "resolution-input",
             "resolution",
             "forecast-step",
+            "evaluation-seal",
+            "evaluation-review",
+            "evaluation",
         ],
     )
     for name in ("create", "analyze"):
@@ -115,6 +128,7 @@ def make_parser() -> argparse.ArgumentParser:
     release = commands.add_parser("release-template", help="生成30天稳定版本发布问题草稿")
     release.add_argument("--project", type=Path, required=True)
     release.add_argument("--forecast-at", required=True)
+    release.add_argument("--evidence-cutoff", help="实验Tc；窗口仍从forecast-at的T0开始")
     protocol = commands.add_parser("protocol", help="实验协议草稿与预登记锁定")
     sub = protocol.add_subparsers(dest="operation", required=True)
     for name in ("create", "validate", "edit"):
@@ -127,6 +141,32 @@ def make_parser() -> argparse.ArgumentParser:
         command.add_argument("protocol_id", type=UUID)
         if name == "lock":
             command.add_argument("--expected-version", type=int, required=True)
+    evaluation = commands.add_parser("evaluation", help="封存实验输入、运行A/B/C及全登记评分")
+    sub = evaluation.add_subparsers(dest="operation", required=True)
+    for name in (
+        "init",
+        "show",
+        "seal",
+        "run",
+        "missing",
+        "cancel",
+        "resolve",
+        "report",
+        "review",
+        "finalize",
+    ):
+        command = sub.add_parser(name)
+        command.add_argument("protocol_id", type=UUID)
+        if name in {"run", "missing", "cancel", "resolve"}:
+            command.add_argument("project_id", type=UUID)
+        if name in {"run", "missing", "cancel"}:
+            command.add_argument("arm", choices=["A", "B", "C"])
+        if name in {"seal", "resolve", "review"}:
+            command.add_argument("--input", type=Path, required=True)
+        if name in {"missing", "cancel"}:
+            command.add_argument("--reason", required=True)
+        if name == "resolve":
+            command.add_argument("--expected-previous", type=UUID)
     evidence = commands.add_parser("evidence", help="资料导入、正文快照、引用及截止筛选（不联网）")
     evidence_sub = evidence.add_subparsers(dest="operation", required=True)
     for name in ("import", "list", "cite", "select"):
@@ -370,6 +410,9 @@ def main() -> int:
                 "resolution-input": ResolutionInput,
                 "resolution": Resolution,
                 "forecast-step": ForecastStep,
+                "evaluation-seal": SealInput,
+                "evaluation-review": EvaluationReview,
+                "evaluation": EvaluationRun,
             }
             emit(contracts[args.kind].model_json_schema())
             return 0
@@ -378,6 +421,9 @@ def main() -> int:
                 release_question(
                     ReleaseProject.model_validate_json(read_text(args.project)),
                     TypeAdapter(UtcTime).validate_python(args.forecast_at),
+                    evidence_cutoff=TypeAdapter(UtcTime).validate_python(args.evidence_cutoff)
+                    if args.evidence_cutoff
+                    else None,
                 )
             )
             return 0
@@ -385,10 +431,12 @@ def main() -> int:
         if args.data_dir:
             settings.data_dir = args.data_dir
         needs_provider = (
-            args.command == "analyze"
+            args.command == "chat"
+            or args.command == "analyze"
             or args.command == "resume"
             or (args.command == "doctor" and args.live)
             or (args.command == "forecast" and args.operation in {"run", "resume"})
+            or (args.command == "evaluation" and args.operation == "run" and args.arm != "A")
         )
         if needs_provider and settings.model_ready():
             provider = CompatibleProvider(settings)
@@ -397,6 +445,88 @@ def main() -> int:
             return 0
         repo = SQLiteRepository(settings.database_path())
         repo.migrate()
+        if args.command == "chat":
+            events = EventService(repo, provider)
+            evidence = EvidenceService(repo, repo, FileSnapshotStore(settings.data_dir))
+            assessments = AssessmentService(repo, repo, evidence)
+            forecasts = ForecastService(repo, repo, assessments, provider)
+            lifecycle = ResolutionService(repo, repo, evidence)
+            research = ResearchService(
+                repo,
+                evidence,
+                SearXNGProvider(settings) if settings.search_base_url else None,
+                StaticPageReader() if settings.search_base_url else None,
+            )
+            return Chat(
+                events,
+                evidence,
+                assessments,
+                forecasts,
+                lifecycle,
+                research,
+                ReportExportService(forecasts, lifecycle, FileReportStore(settings.data_dir)),
+                assistance=None
+                if args.manual
+                else AssistanceService(events, research, assessments, forecasts),
+                create_options={
+                    "max_calls": settings.max_llm_calls,
+                    "max_run_seconds": settings.max_run_seconds,
+                    "max_total_tokens": settings.max_total_tokens,
+                    "max_search_queries": settings.max_search_queries,
+                    "max_pages": settings.max_pages,
+                },
+            ).run(args.resume)
+        if args.command == "evaluation":
+            evidence = EvidenceService(repo, repo, FileSnapshotStore(settings.data_dir))
+            forecasts = ForecastService(
+                repo, repo, AssessmentService(repo, repo, evidence), provider
+            )
+            service = EvaluationService(
+                repo, repo, forecasts, ResolutionService(repo, repo, evidence)
+            )
+            if args.operation == "init":
+                emit(service.start(args.protocol_id))
+            elif args.operation == "finalize":
+                emit(service.finalize(args.protocol_id))
+            elif args.operation == "seal":
+                emit(
+                    service.seal(
+                        args.protocol_id, SealInput.model_validate_json(read_text(args.input))
+                    )
+                )
+            elif args.operation == "run":
+                emit(service.run_arm(args.protocol_id, args.project_id, args.arm))
+            elif args.operation in {"missing", "cancel"}:
+                emit(
+                    service.mark_missing(
+                        args.protocol_id,
+                        args.project_id,
+                        args.arm,
+                        args.reason,
+                        cancelled=args.operation == "cancel",
+                    )
+                )
+            elif args.operation == "resolve":
+                emit(
+                    service.resolve(
+                        args.protocol_id,
+                        args.project_id,
+                        ResolutionInput.model_validate_json(read_text(args.input)),
+                        args.expected_previous,
+                    )
+                )
+            elif args.operation == "review":
+                emit(
+                    service.review(
+                        args.protocol_id,
+                        EvaluationReview.model_validate_json(read_text(args.input)),
+                    )
+                )
+            elif args.operation == "report":
+                emit(evaluation_report(service, service.get(args.protocol_id)))
+            else:
+                emit(service.get(args.protocol_id))
+            return 0
         if args.command in {"forecast", "resolution"}:
             evidence = EvidenceService(repo, repo, FileSnapshotStore(settings.data_dir))
             forecasts = ForecastService(

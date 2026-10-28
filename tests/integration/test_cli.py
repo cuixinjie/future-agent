@@ -34,7 +34,7 @@ def test_installed_cli_help() -> None:
     result = run_cli("--help")
     assert result.returncode == 0
     assert "usage: future-agent" in result.stdout
-    assert "M1" in result.stdout and "protocol" in result.stdout
+    assert all(command in result.stdout for command in ("chat", "protocol", "evaluation"))
 
 
 def test_analyze_requires_input() -> None:

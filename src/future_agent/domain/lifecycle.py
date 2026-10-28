@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from pydantic import Field, model_validator
 
 from future_agent.domain.contracts import Contract, Text, UtcTime, now
+from future_agent.domain.events import ForecastQuestion
 from future_agent.domain.evidence import EvidenceDocument, EvidenceSpan
 from future_agent.domain.forecasts import PROBABILITY_TOLERANCE, Forecast, ForecastSpec
 
@@ -134,7 +135,15 @@ def validate_resolution(frozen: FrozenForecast, value: Resolution) -> None:
         return
     if value.resolved_outcome not in {o.key for o in forecast.spec.outcomes}:
         raise ValueError("结果必须对应冻结的结果定义")
-    question = forecast.event.question
+    validate_resolution_window(forecast.event.question, frozen.early_resolution_outcomes, value)
+
+
+def validate_resolution_window(
+    question: ForecastQuestion, early_outcomes: list[str], value: Resolution
+) -> None:
+    """Shared window rule for ordinary forecasts and pre-registered release experiments."""
+    if value.status != "resolved":
+        return
     if (
         value.observed_at is not None
         and not question.window_start < value.observed_at <= question.window_end
@@ -142,7 +151,7 @@ def validate_resolution(frozen: FrozenForecast, value: Resolution) -> None:
         raise ValueError("发生时间必须在冻结的观察窗口内")
     if value.recorded_at < question.window_end:
         if (
-            value.resolved_outcome not in frozen.early_resolution_outcomes
+            value.resolved_outcome not in early_outcomes
             or value.observed_at is None
             or not question.window_start
             < value.observed_at

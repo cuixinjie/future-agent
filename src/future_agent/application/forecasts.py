@@ -13,15 +13,18 @@ from future_agent.application.ports import (
     NotFound,
     SessionRepository,
 )
+from future_agent.domain.contracts import now
 from future_agent.domain.events import transition
 from future_agent.domain.forecasts import (
     FORECAST_METHOD_VERSION,
     Forecast,
     ForecastDraft,
     ForecastSpec,
+    forecast_schema,
     validate_judgment,
 )
 from future_agent.domain.lifecycle import ForecastStep
+from future_agent.prompts.assistance import JUDGMENT_SYSTEM, JUDGMENT_VERSION
 from future_agent.prompts.forecast import FORECAST_PROMPT_VERSION, FORECAST_SYSTEM
 
 
@@ -52,6 +55,9 @@ class ForecastService:
 
     def get(self, forecast_id: UUID) -> Forecast:
         return self.repository.forecast(forecast_id)
+
+    def step(self, step_id: UUID) -> ForecastStep:
+        return self.repository.step(step_id)
 
     def history(self, sid: UUID, revision: int) -> list[Forecast]:
         return self.repository.forecasts(self.sessions.revision(sid, revision).id)
@@ -99,6 +105,15 @@ class ForecastService:
         if view.stale:
             raise Conflict("评估已失效，请重新评估后预测")
         assessment = view.assessment
+        assisted = spec.guidance is not None
+        prompt_version = JUDGMENT_VERSION if assisted else FORECAST_PROMPT_VERSION
+        method_version = "judgment-2.0" if assisted else FORECAST_METHOD_VERSION
+        if assisted and (
+            assessment.experiment or assessment.assessor_version != "evidence-assessor-2.0"
+        ):
+            raise AppError("新版普通分析不能冒用旧实验资格；请使用独立的新协议版本")
+        if assisted and now() >= event.question.window_start:
+            raise Conflict("窗口已经开始，拒绝重新请求事前预测；请明确建立新分析")
         method = "llm_judgment" if numeric else "scenario_only"
         if method not in assessment.available_methods:
             raise AppError("方法资格不满足；需重新评估并显式开启数值估计，不能自动降级")
@@ -138,8 +153,8 @@ class ForecastService:
                 model_id=self.provider.model_id,
                 structured_mode=self.provider.structured_mode,
                 output_token_limit=self.provider.output_token_limit,
-                prompt_version=FORECAST_PROMPT_VERSION,
-                method_version=FORECAST_METHOD_VERSION,
+                prompt_version=prompt_version,
+                method_version=method_version,
             ),
             None,
         )
@@ -161,9 +176,9 @@ class ForecastService:
 
         active, draft = ModelCalls(self.sessions, self.provider).run(
             active,
-            FORECAST_SYSTEM,
+            JUDGMENT_SYSTEM if assisted else FORECAST_SYSTEM,
             json.dumps(payload, ensure_ascii=False),
-            ForecastDraft.model_json_schema(),
+            forecast_schema(assisted=assisted),
             validate,
             cancelled=lambda: self.repository.step(step.id).status == "cancelled",
         )
@@ -177,7 +192,10 @@ class ForecastService:
             if latest.stale or self.sessions.load(sid).version != active.version:
                 raise Conflict("预测期间输入已变化，拒绝保存结果")
             probabilities, original_sum = validate_judgment(draft, spec, method, reviewed_ids)
+            if assisted and now() >= event.question.window_start:
+                raise Conflict("预测提交时窗口已开始；保留输入，须重新分析，不回填未来预测")
             result = Forecast(
+                schema_version="2.0" if assisted else "1.0",
                 session_id=sid,
                 event=event,
                 assessment=assessment,
@@ -185,7 +203,8 @@ class ForecastService:
                 method=method,
                 calibration_status="uncalibrated" if numeric else "not_applicable",
                 model_id=self.provider.model_id,
-                prompt_version=FORECAST_PROMPT_VERSION,
+                prompt_version=prompt_version,
+                method_version=method_version,
                 structured_mode=self.provider.structured_mode,
                 evidence_cutoff=assessment.cutoff,
                 evidence_documents=documents,
@@ -222,8 +241,10 @@ class ForecastService:
             step.model_id != self.provider.model_id
             or step.structured_mode != self.provider.structured_mode
             or step.output_token_limit != self.provider.output_token_limit
-            or step.prompt_version != FORECAST_PROMPT_VERSION
-            or step.method_version != FORECAST_METHOD_VERSION
+            or step.prompt_version
+            != (JUDGMENT_VERSION if step.spec.guidance else FORECAST_PROMPT_VERSION)
+            or step.method_version
+            != ("judgment-2.0" if step.spec.guidance else FORECAST_METHOD_VERSION)
         ):
             raise Conflict("模型、提示词、方法或计算配置已变化，不能恢复旧步骤")
         session = self.sessions.load(step.session_id)

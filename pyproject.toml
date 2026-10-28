@@ -4,10 +4,15 @@ build-backend = "uv_build"
 
 [project]
 name = "future-agent"
-version = "0.1.0.dev0"
-description = "Evidence-driven forecasting assistant (M1 dossier and protocol workflow)"
+version = "0.1.0a1"
+description = "Evidence-driven forecasting assistant with bounded research and verifiable judgments"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "alembic>=1.17,<2",
     "beautifulsoup4>=4.13,<5",
@@ -16,6 +21,11 @@ dependencies = [
     "python-dotenv>=1.1,<2",
     "sqlalchemy>=2.0,<3",
 ]
+
+[project.urls]
+Repository = "https://github.com/cuixinjie/future-agent"
+Issues = "https://github.com/cuixinjie/future-agent/issues"
+Documentation = "https://github.com/cuixinjie/future-agent/blob/main/docs/README.md"
 
 [project.scripts]
 future-agent = "future_agent.cli:main"

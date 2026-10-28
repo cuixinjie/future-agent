@@ -10,6 +10,23 @@ from future_agent.application.protocols import ProtocolService
 from future_agent.domain.protocols import EvaluationProtocol, release_question
 
 
+def test_new_method_requires_independent_protocol_and_metrics(protocol_fixture):
+    data = protocol_fixture.model_dump(mode="json")
+    data["methods"][2].update(method_version="judgment-2.0", prompt_version="forecast-2.0")
+    with pytest.raises(ValidationError, match="新版方法不能混入旧协议"):
+        EvaluationProtocol.model_validate(data)
+    data["schema_version"] = "2.0"
+    data["update_policy"] = "separate_not_scored"
+    data["compute_comparison"] = "B一次调用；C包含研究，额外成本单列"
+    with pytest.raises(ValidationError, match="新版协议须预登记"):
+        EvaluationProtocol.model_validate(data)
+    data["metrics"] += ["delivery", "citation_errors", "human_inputs", "tokens", "elapsed"]
+    assert EvaluationProtocol.model_validate(data).schema_version == "2.0"
+    data["methods"][2]["prompt_version"] = "forecast-1.0"
+    with pytest.raises(ValidationError, match="新版协议必须明确登记"):
+        EvaluationProtocol.model_validate(data)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

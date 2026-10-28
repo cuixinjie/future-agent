@@ -466,7 +466,7 @@ def test_legacy_session_upgrade_keeps_frozen_payload_and_unknown_ownership(conte
             for table in ("forecasts", "frozen_forecasts")
         }
     loaded = repo.load(session.id)
-    assert loaded.schema_version == "1.4" and loaded.attempts[0].forecast_step_id is None
+    assert loaded.schema_version == "1.5" and loaded.attempts[0].forecast_step_id is None
     with repo.engine.connect() as db:
         assert db.scalar(text("select payload from analysis_sessions")) == old_payload
     repo.save(loaded, loaded.version)
@@ -535,7 +535,7 @@ def test_t10_upgrade_preserves_actual_t09_forecast_and_old_session_payload(conte
                 table: conn.execute(text(f"select * from {table}")).all() for table in tables
             } == before
         assert old.forecast(forecast.id) == forecast
-        assert old.load(forecast.session_id).schema_version == "1.4"
+        assert old.load(forecast.session_id).schema_version == "1.5"
         assert old.load(forecast.session_id).active_forecast_step_id is None
         assert (
             old.seal(

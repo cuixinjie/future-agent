@@ -66,6 +66,7 @@ class ExperimentBudget(Contract):
 
 
 class EvaluationProtocol(Contract):
+    schema_version: Literal["1.0", "2.0"] = "1.0"
     id: UUID = Field(default_factory=uuid4)
     version: int = Field(default=1, ge=1)
     status: Literal["draft", "locked"] = "draft"
@@ -91,6 +92,10 @@ class EvaluationProtocol(Contract):
     metrics: list[Text]
     missing_policy: Literal[MISSING_POLICY] = MISSING_POLICY
     analysis_plan: Text
+    update_policy: Literal["separate_not_scored"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    compute_comparison: Text | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def valid_protocol(self) -> Self:
@@ -111,6 +116,20 @@ class EvaluationProtocol(Contract):
         arms = {method.arm: method for method in self.methods}
         if len(self.methods) != 3 or set(arms) != {"A", "B", "C"}:
             raise ValueError("必须唯一登记 A/B/C 三组")
+        if self.schema_version == "2.0":
+            if self.update_policy is None or self.compute_comparison is None:
+                raise ValueError("新版协议须预登记更新预测另存不计首次评分及额外计算预算差异")
+            if (arms["C"].method_version, arms["C"].prompt_version) != (
+                "judgment-2.0",
+                "forecast-2.0",
+            ):
+                raise ValueError("新版协议必须明确登记judgment-2.0/forecast-2.0")
+            if not {"delivery", "citation_errors", "human_inputs", "tokens", "elapsed"} <= set(
+                self.metrics
+            ):
+                raise ValueError("新版协议须预登记交付、引用错误、人工输入及计算成本指标")
+        elif arms["C"].method_version == "judgment-2.0":
+            raise ValueError("新版方法不能混入旧协议")
         if not arms["B"].model_id or arms["B"].model_id != arms["C"].model_id:
             raise ValueError("B/C 必须使用同一明确模型版本")
         if not arms["B"].prompt_version or not arms["C"].prompt_version:
@@ -150,10 +169,12 @@ class EvaluationProtocol(Contract):
         return self
 
 
-def release_question(project: ReleaseProject, forecast_at: UtcTime) -> ForecastQuestion:
+def release_question(
+    project: ReleaseProject, forecast_at: UtcTime, *, evidence_cutoff: UtcTime | None = None
+) -> ForecastQuestion:
     return ForecastQuestion(
         question=f"{project.name} 的 {project.product_channel} 未来30天是否至少发布一次稳定版？",
-        forecast_at=forecast_at,
+        forecast_at=evidence_cutoff if evidence_cutoff is not None else forecast_at,
         window_start=forecast_at,
         window_end=forecast_at + timedelta(days=WINDOW_DAYS),
         outcome_type="binary",

@@ -200,6 +200,9 @@ class ResearchService:
         focus: str,
         *,
         fixture: bool = False,
+        planned: SearchPlan | None = None,
+        page_limit: int | None = None,
+        seconds_limit: float | None = None,
     ) -> ResearchRun:
         session = self.sessions.load(sid)
         if session.status in {"READING", "FORECASTING"} or any(
@@ -209,7 +212,18 @@ class ResearchService:
         if session.current_revision != revision:
             raise Conflict("仅可研究当前事件版本；旧版本产物保留")
         event = self.sessions.revision(sid, revision)
-        plan = SearchPlanner().plan(event, subject, focus)
+        plan = planned or SearchPlanner().plan(event, subject, focus)
+        if (
+            not event.confirmed
+            or not event.question
+            or plan.event_revision_id != event.id
+            or plan.question_id != event.question.id
+        ):
+            raise Conflict("研究计划必须绑定已确认的当前问题")
+        if page_limit is not None and page_limit < 1:
+            raise ValueError("页面额度必须为正")
+        if seconds_limit is not None and seconds_limit <= 0:
+            raise ValueError("研究时间额度必须为正")
         if self.search is None or self.pages is None:
             raise AppError("未配置搜索；可显式使用 evidence import 导入资料")
         run = ResearchRun(
@@ -220,6 +234,8 @@ class ResearchService:
             session.version,
         )
         deadline = time.monotonic() + session.max_run_seconds - session.consumed_seconds
+        if seconds_limit is not None:
+            deadline = min(deadline, time.monotonic() + seconds_limit)
         started = time.monotonic()
         initial_seconds = session.consumed_seconds
         seen: set[str] = set()
@@ -281,7 +297,10 @@ class ResearchService:
                 (remaining if host in hosts else diverse).append(candidate)
                 hosts.add(host)
             candidates = diverse + remaining
-            for candidate in candidates:
+            for page_index, candidate in enumerate(candidates):
+                if page_limit is not None and page_index >= page_limit:
+                    self._gap(sid, run.id, "stage_page_limit")
+                    break
                 try:
                     value = self._call(
                         sid,

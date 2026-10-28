@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 
 from future_agent.application.ports import AppError, Conflict, NotFound
 from future_agent.domain.assessment import EvidenceAssessment
+from future_agent.domain.contracts import now
+from future_agent.domain.evaluation import EvaluationRun
 from future_agent.domain.events import AnalysisSession, EventRevision, transition
 from future_agent.domain.evidence import EvidenceDocument, EvidenceSpan
 from future_agent.domain.forecasts import Forecast
@@ -25,6 +27,7 @@ from future_agent.domain.lifecycle import (
 from future_agent.domain.protocols import EvaluationProtocol
 from future_agent.storage.models import (
     AssessmentRow,
+    EvaluationRunRow,
     EvidenceRow,
     EvidenceSpanRow,
     ForecastRow,
@@ -54,6 +57,15 @@ class SQLiteRepository:
 
     def close(self) -> None:
         self.engine.dispose()
+
+    def list_sessions(self) -> list[AnalysisSession]:
+        with Session(self.engine) as db:
+            rows = db.scalars(select(SessionRow).order_by(SessionRow.id)).all()
+            return sorted(
+                (AnalysisSession.model_validate_json(row.payload) for row in rows),
+                key=lambda session: (session.created_at, str(session.id)),
+                reverse=True,
+            )
 
     def save_forecast(
         self,
@@ -541,3 +553,135 @@ class SQLiteRepository:
         except IntegrityError as exc:
             raise Conflict("协议已存在") from exc
         return protocol
+
+    def evaluation(self, protocol_id: UUID) -> EvaluationRun:
+        with Session(self.engine) as db:
+            row = db.get(EvaluationRunRow, str(protocol_id))
+            if row is None:
+                raise NotFound("实验尚未初始化")
+            return EvaluationRun.model_validate_json(row.payload)
+
+    def save_evaluation(self, value: EvaluationRun, expected_version: int | None) -> EvaluationRun:
+        value = EvaluationRun.model_validate_json(value.model_dump_json())
+        saved = (
+            value.model_copy(update={"version": value.version + 1}) if expected_version else value
+        )
+        try:
+            with Session(self.engine) as db, db.begin():
+                protocol = db.get(ProtocolRow, str(value.id))
+                if (
+                    protocol is None
+                    or EvaluationProtocol.model_validate_json(protocol.payload) != value.protocol
+                ):
+                    raise Conflict("实验协议与锁定原文不一致")
+                for entry in value.entries:
+                    prediction = entry.prediction
+                    if entry.arm != "C" or prediction is None:
+                        continue
+                    frozen = db.get(FrozenForecastRow, str(prediction.frozen_forecast_id))
+                    if frozen is None:
+                        raise Conflict("C实验预测尚未冻结")
+                    frozen = FrozenForecast.model_validate_json(frozen.payload)
+                    forecast = frozen.forecast
+                    snapshot = next(s for s in value.snapshots if s.project_id == entry.project_id)
+                    if (
+                        frozen.supersedes_forecast_id is not None
+                        or forecast.session_id != snapshot.session_id
+                        or forecast.event.revision != snapshot.revision
+                        or forecast.assessment.id != snapshot.assessment_id
+                        or forecast.evidence_cutoff != value.protocol.evidence_cutoff
+                        or forecast.draft != prediction.draft
+                        or forecast.probabilities[0] != prediction.probability
+                        or frozen.frozen_at != prediction.submitted_at
+                        or forecast.method != prediction.method
+                        or forecast.method_version != prediction.method_version
+                        or forecast.model_id != prediction.model_id
+                        or forecast.prompt_version != prediction.prompt_version
+                    ):
+                        raise Conflict("C实验产物必须来自相同输入与版本的首次冻结预测")
+                for history in value.resolutions.values():
+                    for result in history:
+                        for document in result.evidence_documents:
+                            row = db.get(EvidenceRow, str(document.id))
+                            if (
+                                row is None
+                                or EvidenceDocument.model_validate_json(row.payload) != document
+                            ):
+                                raise Conflict("结果正文必须对应已保存资料")
+                        for span in result.evidence_spans:
+                            row = db.get(EvidenceSpanRow, str(span.id))
+                            if row is None or EvidenceSpan.model_validate_json(row.payload) != span:
+                                raise Conflict("结果引用必须对应已保存片段")
+                if expected_version is None:
+                    if now() > value.protocol.evidence_cutoff:
+                        raise Conflict("实验登记写入前已过Tc")
+                    if (
+                        value.version != 1
+                        or value.snapshots
+                        or value.resolutions
+                        or any(e.status != "waiting" or e.prediction for e in value.entries)
+                    ):
+                        raise Conflict("实验只能从完整待执行登记初始化")
+                    db.add(
+                        EvaluationRunRow(
+                            id=str(saved.id), version=1, payload=saved.model_dump_json()
+                        )
+                    )
+                else:
+                    row = db.get(EvaluationRunRow, str(value.id))
+                    if row is None:
+                        raise NotFound("实验不存在")
+                    old = EvaluationRun.model_validate_json(row.payload)
+                    if (
+                        old.version != expected_version
+                        or value.version != expected_version
+                        or old.created_at != value.created_at
+                    ):
+                        raise Conflict("实验版本冲突")
+                    if value.snapshots[: len(old.snapshots)] != old.snapshots:
+                        raise Conflict("封存输入不可覆盖")
+                    if value.reviews[: len(old.reviews)] != old.reviews:
+                        raise Conflict("人工审查历史不可覆盖")
+                    for key, history in old.resolutions.items():
+                        if value.resolutions.get(key, [])[: len(history)] != history:
+                            raise Conflict("核验历史不可覆盖")
+                    if (
+                        len(value.snapshots) > len(old.snapshots)
+                        and now() > value.protocol.evidence_cutoff
+                    ):
+                        raise Conflict("快照写入前已过Tc")
+                    if now() > value.protocol.forecast_at:
+                        entries = [
+                            e.model_copy(
+                                update={"status": "late", "reason": "数据库提交前已过共同T0"}
+                            )
+                            if old.entries[i].status == "running"
+                            and e.status in {"submitted", "refused", "scenario"}
+                            else e
+                            for i, e in enumerate(value.entries)
+                        ]
+                        saved = saved.model_copy(update={"entries": entries})
+                    for previous, updated in zip(old.entries, value.entries, strict=True):
+                        if (previous.project_id, previous.arm, previous.step_id) != (
+                            updated.project_id,
+                            updated.arm,
+                            updated.step_id,
+                        ):
+                            raise Conflict("预登记条目身份不可更改")
+                        if previous.status not in {"waiting", "running"} and previous != updated:
+                            raise Conflict("首次预测及失败记录不可覆盖")
+                        if previous.status == "running" and updated.status == "waiting":
+                            raise Conflict("中断条目不可重置")
+                    changed = db.execute(
+                        update(EvaluationRunRow)
+                        .where(
+                            EvaluationRunRow.id == str(value.id),
+                            EvaluationRunRow.version == expected_version,
+                        )
+                        .values(version=saved.version, payload=saved.model_dump_json())
+                    )
+                    if changed.rowcount != 1:
+                        raise Conflict("实验版本冲突")
+        except IntegrityError as exc:
+            raise Conflict("实验已存在，不得覆盖首次预测") from exc
+        return saved

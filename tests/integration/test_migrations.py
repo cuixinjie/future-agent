@@ -24,9 +24,10 @@ def test_initial_alembic_migration_is_real_and_repeatable(repo):
             "frozen_forecasts",
             "resolutions",
             "forecast_steps",
+            "evaluation_runs",
         }
         assert (
-            connection.scalar(text("select version_num from alembic_version")) == "0005_lifecycle"
+            connection.scalar(text("select version_num from alembic_version")) == "0006_evaluation"
         )
     session = EventService(repo).create("保存原文")
     repo.migrate()

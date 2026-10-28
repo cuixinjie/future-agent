@@ -38,6 +38,10 @@ class ModelCalls:
         validate: Callable[[str], T],
         *,
         cancelled: Callable[[], bool] = lambda: False,
+        max_repairs: int = MAX_FORMAT_REPAIRS,
+        max_retries: int = MAX_TRANSIENT_RETRIES,
+        progress: Callable[[str], None] = lambda _: None,
+        repair_hint: Callable[[Exception], str] = lambda _: "",
     ) -> tuple[AnalysisSession, T]:
         user = base_user
         repairs = retries = 0
@@ -82,6 +86,7 @@ class ModelCalls:
                 )
             )
             started = time.monotonic()
+            progress(f"模型请求开始（本次最多等待 {timeout:.0f} 秒）。")
             reply = None
             error = None
             try:
@@ -123,11 +128,12 @@ class ModelCalls:
                 raise AppError("预测已取消；保留历史调用与费用")
             if error:
                 if error.code in {"rate_limited", "temporary", "timeout", "network"}:
-                    if retries < MAX_TRANSIENT_RETRIES:
+                    if retries < max_retries:
                         retries += 1
                         delay = error.retry_after if error.retry_after is not None else 2**retries
                         remaining = deadline - time.monotonic()
                         if delay < remaining and len(session.attempts) < session.max_calls:
+                            progress(f"模型请求失败（{error.code}），{delay:.0f} 秒后重试。")
                             session = self._save(
                                 session.model_copy(
                                     update={
@@ -149,7 +155,7 @@ class ModelCalls:
             assert reply is not None
             try:
                 return session, validate(reply.content)
-            except (ValidationError, ValueError):
+            except (ValidationError, ValueError) as exc:
                 session = self._save(
                     session.model_copy(
                         update={
@@ -166,13 +172,25 @@ class ModelCalls:
                     )
                 )
                 # Do not echo untrusted payloads or validation input into logs/prompts.
-                if repairs >= MAX_FORMAT_REPAIRS:
+                if repairs >= max_repairs:
+                    hint = repair_hint(exc)
+                    if hint:
+                        progress(f"模型输出仍未通过校验：{hint}")
                     self._fail(session, "invalid_output")
-                    raise AppError("模型输出未通过结构、引用或语义规则；两次修复仍失败") from None
+                    raise AppError(
+                        "模型输出未通过结构、引用或语义规则；"
+                        + ("两次修复仍失败" if max_repairs == 2 else "不再修复")
+                    ) from None
                 repairs += 1
+                hint = repair_hint(exc)
+                progress(
+                    f"模型输出未通过校验，正在重新生成（{repairs}/{max_repairs}）。"
+                    + (f" {hint}" if hint else "")
+                )
                 user = (
                     base_user
                     + "\n上次输出未通过校验。请重新核对 Schema、引用、结果定义及概率规则。"
+                    + ("\n" + hint if hint else "")
                 )
 
     def _fail(self, session: AnalysisSession, code: str) -> None:

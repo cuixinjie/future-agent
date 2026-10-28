@@ -41,6 +41,12 @@ class ResolutionService:
             return render_report(self.forecasts.forecast(forecast_id))
         return render_report(frozen.forecast, frozen=frozen)
 
+    def frozen(self, forecast_id: UUID) -> FrozenForecast | None:
+        try:
+            return self.repository.frozen(forecast_id)
+        except NotFound:
+            return None
+
     def freeze(
         self,
         forecast_id: UUID,

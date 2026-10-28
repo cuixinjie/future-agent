@@ -27,12 +27,44 @@ def render_report(forecast: Forecast, *, frozen: FrozenForecast | None = None) -
         f"模型：{forecast.model_id}；提示词：{forecast.prompt_version}",
         f"结果定义审查：{forecast.spec.definition_review}",
     ]
+    if forecast.draft.judgment is not None:
+        judgment = forecast.draft.judgment
+        labels = {
+            "probability": "概率预测（未校准）",
+            "directional": "方向判断",
+            "conditional": "条件分析（无总体预测）",
+            "exploration": "开放探索",
+            "unable": "无法判断",
+        }
+        definitions = {o.key: o.definition for o in forecast.spec.outcomes}
+        lead = [f"交付：{labels[judgment.delivery]}", f"当前判断：{judgment.conclusion}"]
+        if judgment.primary_outcome:
+            lead.append("首选结果：" + definitions[judgment.primary_outcome])
+        if judgment.ranking:
+            lead.append("结果排序：" + " → ".join(definitions[k] for k in judgment.ranking))
+        lead.extend(
+            [
+                "参照起点：" + judgment.reference_basis,
+                "本次差异与调整：" + judgment.differences_and_adjustment,
+                "关键因素：" + "；".join(judgment.key_drivers),
+                "未知的影响：" + ("；".join(judgment.unknown_effects) or "无新增说明"),
+                "改变判断的条件：" + "；".join(judgment.change_conditions),
+            ]
+        )
+        if judgment.no_numeric_reason:
+            lead.append("未提供概率：" + judgment.no_numeric_reason)
+        if forecast.spec.guidance.action_conditions:
+            lead.append("行动/适用条件：" + "；".join(forecast.spec.guidance.action_conditions))
+        lead.append("目标默认与假设：" + ("；".join(forecast.spec.guidance.assumptions) or "无"))
+        lines = [*lead, "", *lines]
     if frozen is not None:
         lines.extend(
             [f"冻结时间：{frozen.frozen_at.isoformat()}", f"冻结内容 SHA256：{frozen.input_hash}"]
         )
-    if not forecast.assessment.experiment or forecast.event.origin == "fixture":
+    if forecast.event.origin == "fixture":
         lines.append("离线/夹具许可输入：不代表真实实验或服务能力。")
+    elif not forecast.assessment.experiment:
+        lines.append("普通分析：未登记为独立前瞻实验；不据此宣称预测效果。")
     if forecast.draft.refusal_reason:
         lines.append(f"数值估计拒绝原因：{forecast.draft.refusal_reason}")
     for definition, outcome, probability in zip(

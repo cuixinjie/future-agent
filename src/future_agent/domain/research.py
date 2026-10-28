@@ -14,7 +14,7 @@ DEFAULT_MAX_PAGES = 16
 
 class SearchQuery(Contract):
     query: Text
-    purpose: Literal["current_state", "counterevidence"]
+    purpose: Literal["current_state", "counterevidence", "reference", "mechanism"]
     language: Text = "all"
     time_filter: Literal["day", "week", "month", "year"] | None = None
     expected_evidence_type: Text = "official status, announcements or primary records"
@@ -23,9 +23,16 @@ class SearchQuery(Contract):
 class SearchPlan(Contract):
     event_revision_id: UUID
     question_id: UUID
-    planner_version: Literal["search-rules-1.0"] = "search-rules-1.0"
+    planner_version: Literal[
+        "search-rules-1.0",
+        "target-research-1.0",
+        "target-research-1.1",
+        "target-research-1.2",
+        "target-research-1.3",
+        "target-research-1.4",
+    ] = "search-rules-1.0"
     cutoff: UtcTime
-    queries: list[SearchQuery] = Field(min_length=2, max_length=2)
+    queries: list[SearchQuery] = Field(min_length=1, max_length=4)
     skipped: list[Text] = Field(
         default_factory=lambda: ["机制、案例和统计查询留待证据评估后按需开展；不为凑数扩展检索。"]
     )

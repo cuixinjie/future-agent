@@ -326,7 +326,7 @@ def test_legacy_session_upgrades_without_resetting_model_budget(setup, repo):
     data["consumed_seconds"] = 42
     data["consumed_tokens"] = 12345
     restored = AnalysisSession.model_validate(data)
-    assert restored.schema_version == "1.4" and restored.research_runs == []
+    assert restored.schema_version == "1.5" and restored.research_runs == []
     assert restored.consumed_seconds == 42 and restored.consumed_tokens == 12345
 
 
