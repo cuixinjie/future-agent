@@ -251,6 +251,31 @@ class AssistanceService:
             raise Conflict("没有待回答的澄清轮次")
         text = answer.strip() or "用户明确不知道或跳过本轮问题；保留未知，不再追问。"
         session = self.sessions.load(sid)
+        if (
+            not answer.strip()
+            and state.reading is not None
+            and state.plan is not None
+            and state.plan.usable()
+            and state.research_revision == session.current_revision
+            and state.event_revision == session.current_revision
+            and state.source_count == len(session.sources)
+            and state.clarification_questions
+            and all(q.kind == "private_fact" for q in state.clarification_questions)
+        ):
+            # No new facts: keep the evidence and its authorization instead of replanning.
+            # Persist each unresolved question so the final judgment sees the limitation.
+            return self._save(
+                sid,
+                clarification_answer=text,
+                stage="reviewing",
+                research_gaps=[
+                    *state.research_gaps,
+                    *[
+                        f"用户跳过，仍未知：{q.question}；对判断的影响：{q.changes_judgment}"
+                        for q in state.clarification_questions
+                    ],
+                ],
+            )
         self.events.answer(sid, session.current_revision, text)
         self._save(sid, clarification_answer=text, stage="planning")
         return self.prepare(sid)

@@ -338,6 +338,10 @@ def test_numeric_can_use_concrete_user_information_with_unknowns(repo, tmp_path)
     assert result.probabilities == [0.7, 0.3] and result.event.unknowns
     assert result.assessment.assessor_version == "evidence-assessor-2.0"
     assert result.draft.judgment.delivery == "probability"
+    report = ResolutionService(repo, repo, service.evidence).report(result.id)
+    summary = report.split("预测报告（", 1)[0]
+    assert summary.startswith("问题：") and "窗口：" in summary
+    assert "主观概率（未校准）：窗口内发布稳定版：0.7；完整窗口未发布稳定版：0.3" in summary
 
 
 def test_resume_after_followup_reexamines_evidence(repo, tmp_path, monkeypatch):
@@ -383,7 +387,8 @@ def test_complete_plan_can_raise_critical_target_clarification(repo, tmp_path):
     assert service.prepare(sid).stage == "clarification"
 
 
-def test_research_clarification_persists_and_skip_uses_same_allowance(repo, tmp_path):
+@pytest.mark.parametrize("answer", ["", "现金还能维持六个月"])
+def test_research_clarification_persists_and_skip_uses_same_allowance(repo, tmp_path, answer):
     class PrivateProvider(AssistantProvider):
         def generate(self, system, user, schema, timeout):
             reply = super().generate(system, user, schema, timeout)
@@ -404,15 +409,42 @@ def test_research_clarification_persists_and_skip_uses_same_allowance(repo, tmp_
                 return ModelReply(content=json.dumps(output), input_tokens=100, output_tokens=100)
             return reply
 
-    service, sid = setup(repo, tmp_path, PrivateProvider())
+    provider = PrivateProvider()
+    search = SearchFixture()
+    service, sid = setup(repo, tmp_path, provider, search)
     with pytest.raises(AppError, match="研究后需要"):
-        service.execute(sid)
+        service.execute(sid, allow_search=True)
     state = service.state(sid)
     assert state.stage == "clarification" and state.clarification_used
     assert service.prepare(sid).clarification_questions[0].kind == "private_fact"
-    service.answer(sid, "")
-    assert service.execute(sid).draft.judgment.delivery == "directional"
+    calls = len(provider.calls)
+    queries = list(search.queries)
+    sources = len(repo.load(sid).sources)
+    service.answer(sid, answer)
+    if not answer:
+        assert len(provider.calls) == calls
+        assert len(repo.load(sid).sources) == sources
+        resumed = service.prepare(sid)
+        assert resumed.stage == "reviewing"
+        assert resumed.reading == state.reading
+        assert resumed.approved_queries == state.approved_queries
+        assert resumed.research_rounds == state.research_rounds
+        assert resumed.clarification_answer
+    else:
+        assert len(provider.calls) > calls
+        assert len(repo.load(sid).sources) == sources + 1
+        assert service.state(sid).stage == "planned"
+    result = service.execute(sid)
+    assert result.draft.judgment.delivery == "directional"
+    if not answer:
+        assert len(provider.calls) == calls + 1  # Only the final judgment remains.
+        assert search.queries == queries
+        assert result.evidence_spans
+        assert any("用户跳过，仍未知" in gap for gap in result.assessment.limitations)
+        assert any("现金还能维持多久" in gap for gap in result.assessment.limitations)
     assert service.state(sid).clarification_used
+    with pytest.raises(AppError, match="没有待回答"):
+        service.answer(sid, "")
 
 
 def test_one_clarification_round_skip_survives_reopen(repo, tmp_path):

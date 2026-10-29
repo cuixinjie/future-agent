@@ -21,6 +21,7 @@ from future_agent.domain.events import AnalysisSession, EventDraft, EventRevisio
 from future_agent.domain.evidence import EvidenceImport, EvidenceSpan
 from future_agent.domain.forecasts import Forecast, ForecastSpec, OutcomeDefinition
 from future_agent.domain.lifecycle import ResolutionInput
+from future_agent.terminal import forecast_summary, report_details, terminal_layout
 
 
 class ChatExit(Exception):
@@ -34,7 +35,8 @@ class Navigate(Exception):
 
 HELP = """操作指南
 
-  常用    /continue 继续分析   /status 状态与预算   /report 查看报告
+  常用    /continue 继续分析   /status 状态与预算   /report 结果概览
+          /details 完整报告
           /save 保存报告       /help 帮助           /exit 退出
   会话    /new 新建            /select 选择         /history 历史预测
   分析    /read 读取档案       /answer 补充信息     /unknown 保留未知
@@ -75,7 +77,7 @@ class Chat:
 
     def say(self, value: object) -> None:
         # External text must not execute terminal escape/control sequences.
-        self.write(self.terminal_text(str(value)))
+        self.write(terminal_layout(self.terminal_text(str(value))))
 
     @staticmethod
     def terminal_text(value: str) -> str:
@@ -85,11 +87,11 @@ class Chat:
 
     def ask(self, prompt: str, *, empty: bool = False) -> str:
         while True:
-            label = "" if prompt == "你" else self.terminal_text(prompt) + "\n"
+            label = "" if prompt == "你" else terminal_layout(self.terminal_text(prompt)) + "\n"
             value = self.read(label + "\n> ").strip()
             if value.startswith("/"):
                 command = value.lower()
-                if command in {"/status", "/report", "/save", "/help"}:
+                if command in {"/status", "/report", "/details", "/save", "/help"}:
                     self.dispatch(command)
                     continue
                 raise Navigate(command)
@@ -107,6 +109,7 @@ class Chat:
             self.say("请明确输入 y 或 n。")
 
     def choose(self, prompt: str, labels: list[str]) -> int:
+        self.say("")
         for index, label in enumerate(labels, 1):
             self.say(f"  {index}. {label}")
         while True:
@@ -196,6 +199,7 @@ class Chat:
             "/research": self.guide if self.assistance else self.search,
             "/forecast": self.guide if self.assistance else self.predict,
             "/report": self.report,
+            "/details": self.details,
             "/save": self.save,
             "/history": self.history,
             "/freeze": self.freeze,
@@ -245,11 +249,14 @@ class Chat:
         self.say(f"会话 {s.id}\n阶段 {s.status} | 事件 v{s.current_revision}")
         attempts = [a for r in s.research_runs for a in r.attempts]
         self.say(
-            f"剩余预算：模型 {max(0, s.max_calls - len(s.attempts))}/{s.max_calls} 次；"
-            f"token {max(0, s.max_total_tokens - s.consumed_tokens)}；"
-            f"时间 {max(0, s.max_run_seconds - s.consumed_seconds):.1f} 秒；"
-            f"搜索 {max(0, s.max_search_queries - sum(a.kind == 'search' for a in attempts))} 次；"
-            f"页面 {max(0, s.max_pages - sum(a.kind == 'page' for a in attempts))} 次。费用未知。"
+            f"\n剩余预算\n"
+            f"  模型：{max(0, s.max_calls - len(s.attempts))}/{s.max_calls} 次\n"
+            f"  token：{max(0, s.max_total_tokens - s.consumed_tokens)}\n"
+            f"  时间：{max(0, s.max_run_seconds - s.consumed_seconds):.1f} 秒\n"
+            "  搜索："
+            f"{max(0, s.max_search_queries - sum(a.kind == 'search' for a in attempts))} 次\n"
+            f"  页面：{max(0, s.max_pages - sum(a.kind == 'page' for a in attempts))} 次\n"
+            "  费用：未知"
         )
         if s.error_code:
             self.say(f"失败类别：{s.error_code}")
@@ -270,7 +277,8 @@ class Chat:
 
     def dossier(self) -> None:
         event = self.event()
-        self.say(f"档案 v{event.revision} | {'已确认' if event.confirmed else '待人工审查'}")
+        self.say(f"\n── 档案 v{event.revision} ──\n")
+        self.say("已确认" if event.confirmed else "待人工审查")
         for claim in event.claims:
             self.say(f"陈述 [{claim.assertion_type}/{claim.verification_status}] {claim.quote}")
         for label, items in (
@@ -403,18 +411,21 @@ class Chat:
 
     def assisted_guide(self) -> None:
         self.session()
-        self.say("正在整理目标与研究计划；已有分析步骤和预算会保留。")
+        self.say("\n── 分析进度 ──\n\n正在整理目标与研究计划；已有分析步骤和预算会保留。")
         state = self.assistance.prepare(self.sid, progress=self.say)
         if state.stage == "search_authorization":
-            self.say("研究发现新的信息缺口，拟补充以下公开查询：")
+            self.say("\n── 补充研究 ──\n\n研究发现新的信息缺口，拟补充以下公开查询：")
             for query in state.pending_queries:
-                self.say(f"• {query.query}；目的：{query.decision_gap}")
+                self.say(f"\n• {query.query}\n  目的：{query.decision_gap}")
             self.assistance.authorize_followup(self.sid, self.yes("允许发送以上新增查询？"))
             state = self.assistance.state(self.sid)
         if state.stage == "clarification":
-            self.say("以下是本次唯一一轮澄清；可以一起回答，不知道或不想补充可直接回车。")
+            self.say(
+                "\n── 待补充信息 ──\n\n以下是本次唯一一轮澄清；"
+                "可以一起回答，不知道或不想补充可直接回车。"
+            )
             for question in state.clarification_questions:
-                self.say(f"• {question.question}\n  对判断的影响：{question.changes_judgment}")
+                self.say(f"\n• {question.question}\n  对判断的影响：{question.changes_judgment}")
             answer = self.ask("补充信息（回车保留未知并继续）", empty=True)
             state = self.assistance.answer(self.sid, answer)
         if state.stage == "unanswerable":
@@ -426,7 +437,7 @@ class Chat:
             self.report()
             return
         plan = state.plan
-        self.say(f"拟分析：{plan.question}\n核验规则：{plan.resolution_rule}")
+        self.say(f"\n── 分析目标 ──\n\n拟分析：{plan.question}\n\n核验规则：{plan.resolution_rule}")
         self.say("系统默认与假设：" + ("；".join(plan.assumptions) or "无新增默认"))
         if plan.action_conditions:
             self.say("行动/适用条件：" + "；".join(plan.action_conditions))
@@ -437,9 +448,11 @@ class Chat:
             )
         allow_search = False
         if state.stage == "planned" and plan.queries and self.research.search:
-            self.say("拟发送的公开查询（后两条仅在重要缺口尚未解决时使用）：")
+            self.say(
+                "\n── 公开资料研究 ──\n\n拟发送的公开查询（后两条仅在重要缺口尚未解决时使用）："
+            )
             for query in plan.queries:
-                self.say(f"• {query.query}；目的：{query.decision_gap}")
+                self.say(f"\n• {query.query}\n  目的：{query.decision_gap}")
             allow_search = self.yes("允许发送以上公开查询并自动读取、分析正文？")
         self.say("正在研究并形成判断；无需手工摘录或填写结果审查表。")
         try:
@@ -601,11 +614,30 @@ class Chat:
         return self.forecasts.get(self.selected)
 
     def report(self) -> None:
-        self.say("\n── 预测报告 ──")
         f = self.forecast()
+        frozen = self.lifecycle.frozen(f.id)
+        if frozen:
+            f = frozen.forecast
         if f.event.revision != self.session().current_revision:
-            self.say("这是旧事件版本的历史报告，不能解释为当前目标的结果。")
-        self.say(self.lifecycle.report(f.id))
+            self.say("\n这是旧事件版本的历史报告，不能解释为当前目标的结果。")
+        self.say(forecast_summary(f))
+        self.say(
+            "\n状态：已冻结；实验评分资格须另行检查。"
+            if frozen
+            else "\n状态：草稿，尚未冻结，不用于实验评分。"
+        )
+        self.say(
+            "\n── 接下来 ──\n\n/details 完整依据、引用与版本信息\n"
+            "/save 保存完整报告  ·  /help 查看其他操作"
+        )
+
+    def details(self) -> None:
+        f = self.forecast()
+        self.say("\n── 完整预测报告 ──\n")
+        if f.event.revision != self.session().current_revision:
+            self.say("这是旧事件版本的历史报告，不能解释为当前目标的结果。\n")
+        self.say(report_details(self.lifecycle.report(f.id)))
+        self.say("\n/report 返回结果概览  ·  /save 保存完整报告")
 
     def save(self) -> None:
         paths = self.exports.save(self.forecast().id)

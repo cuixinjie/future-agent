@@ -37,9 +37,24 @@ def render_report(forecast: Forecast, *, frozen: FrozenForecast | None = None) -
             "unable": "无法判断",
         }
         definitions = {o.key: o.definition for o in forecast.spec.outcomes}
-        lead = [f"交付：{labels[judgment.delivery]}", f"当前判断：{judgment.conclusion}"]
+        lead = [
+            f"问题：{question.question}",
+            f"窗口：{question.window_start.isoformat()} 至 {question.window_end.isoformat()}",
+            f"交付：{labels[judgment.delivery]}",
+            f"当前判断：{judgment.conclusion}",
+        ]
         if judgment.primary_outcome:
             lead.append("首选结果：" + definitions[judgment.primary_outcome])
+        if judgment.delivery == "probability":
+            lead.append(
+                "主观概率（未校准）："
+                + "；".join(
+                    f"{definition.definition}：{probability!r}"
+                    for definition, probability in zip(
+                        forecast.spec.outcomes, forecast.probabilities, strict=True
+                    )
+                )
+            )
         if judgment.ranking:
             lead.append("结果排序：" + " → ".join(definitions[k] for k in judgment.ranking))
         lead.extend(

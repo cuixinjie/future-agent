@@ -32,6 +32,7 @@ from future_agent.domain.events import CallAttempt, EventDraft, SourceText
 from future_agent.domain.evidence import EvidenceImport
 from future_agent.storage.reports import FileReportStore
 from future_agent.storage.snapshots import FileSnapshotStore
+from future_agent.terminal import display_width, terminal_layout
 
 
 class Terminal:
@@ -81,6 +82,15 @@ def test_chat_welcome_and_help_keep_navigation_accessible(repo, tmp_path):
     assert "操作指南" in terminal.text and "/continue" in terminal.text
     assert any(line.endswith("\n> ") for line in terminal.lines)
     assert "模型会接收叙述" in terminal.text
+
+
+def test_narrow_terminal_preserves_long_chinese_content_and_paragraphs():
+    text = "  • 关键依据：" + "中文与ASCII混排e\u0301，不应丢失正文。" * 8
+    rendered = terminal_layout(text + "\n\n下一步：/details", width=40)
+    assert all(display_width(line) <= 40 for line in rendered.splitlines())
+    assert "\n\n下一步：/details" in rendered
+    assert "".join(rendered.split()) == "".join((text + "下一步：/details").split())
+    assert rendered.splitlines()[1].startswith("    ")
 
 
 def test_internal_reader_questions_hidden_in_ordinary_status(repo, tmp_path):
@@ -190,10 +200,16 @@ def test_resume_navigation_and_report_never_calls_model(repo, tmp_path):
     f = saved_forecast(chat)
     original = repo.load(sid)
     provider = FixtureProvider([])
-    resumed, terminal = setup_chat(repo, tmp_path, provider, ["/report", "/save", "/exit"])
+    resumed, terminal = setup_chat(
+        repo, tmp_path, provider, ["/report", "/details", "/save", "/exit"]
+    )
     assert resumed.run(sid) == 0
     assert provider.users == [] and repo.load(sid) == original
     assert str(f.id) in terminal.text
+    summary, details = terminal.text.split("── 完整预测报告 ──", 1)
+    assert "── 预测结果 ──" in summary and "/details" in summary
+    assert "预测ID：" not in summary and "引用来源：" not in summary
+    assert "预测ID：" in details and "引用来源：" in details
     selected, _ = setup_chat(repo, tmp_path, provider, ["2", "/exit"])
     assert selected.run() == 0 and selected.sid == sid
 
@@ -539,7 +555,7 @@ def test_cli_create_reopen_without_model_in_separate_processes(tmp_path):
         env={**env, "PYTHONUTF8": "1"},
     )
     assert second.returncode == 0, second.stderr
-    assert "CREATED" in second.stdout and "模型 12/12" in second.stdout
+    assert "CREATED" in second.stdout and "模型：12/12" in second.stdout
 
 
 def test_cancel_read_does_not_reset_budget(repo, tmp_path):
