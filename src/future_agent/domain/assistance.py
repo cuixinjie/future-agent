@@ -6,6 +6,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from future_agent.domain.contracts import Contract, Text, UtcTime
+from future_agent.domain.research import MAX_PUBLIC_QUERY_CHARS
 
 
 class ProposedOutcome(Contract):
@@ -21,7 +22,12 @@ class Clarification(Contract):
 
 
 class PlannedQuery(Contract):
-    query: Text
+    # Generation schema advertises the limit; application validation provides safe,
+    # specific repair feedback without changing historical record deserialization.
+    query: Text = Field(
+        description="单行公开搜索关键词；不含网址、邮箱、电话、控制字符或私人信息",
+        json_schema_extra={"maxLength": MAX_PUBLIC_QUERY_CHARS},
+    )
     purpose: Literal["current_state", "counterevidence", "reference", "mechanism"]
     decision_gap: Text
 

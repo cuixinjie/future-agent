@@ -76,7 +76,7 @@ class AssistantProvider:
         if self.interrupt is not None and self.interrupt == version:
             self.interrupt = "already-interrupted"
             raise KeyboardInterrupt
-        if version == "target-research-1.4":
+        if version == "target-research-1.5":
             output = self.plan or plan_data()
             if self.clarify and data["clarification_available"]:
                 output.update(question=None, outcomes=[], unavailable_reason="私人项目对象无法确定")
@@ -88,7 +88,7 @@ class AssistantProvider:
                         "cannot_research_reason": "私人项目未知",
                     }
                 ]
-        elif version == "evidence-reading-1.2":
+        elif version == "evidence-reading-1.3":
             documents = data["documents"]
             output = {
                 "citations": [
@@ -163,7 +163,7 @@ class DynamicQueryProvider(AssistantProvider):
     def generate(self, system, user, schema, timeout):
         reply = super().generate(system, user, schema, timeout)
         data = json.loads(user.split("\n上次输出")[0])
-        if data.get("prompt_version") == "evidence-reading-1.2" and data.get(
+        if data.get("prompt_version") == "evidence-reading-1.3" and data.get(
             "allow_new_followup_queries"
         ):
             value = json.loads(reply.content)
@@ -203,7 +203,7 @@ def test_new_followup_with_private_contact_is_rejected_before_network(repo, tmp_
         def generate(self, system, user, schema, timeout):
             reply = super().generate(system, user, schema, timeout)
             data = json.loads(user.split("\n上次输出")[0])
-            if data.get("prompt_version") == "evidence-reading-1.2" and data.get(
+            if data.get("prompt_version") == "evidence-reading-1.3" and data.get(
                 "allow_new_followup_queries"
             ):
                 value = json.loads(reply.content)
@@ -223,7 +223,7 @@ def test_quote_repeated_outside_excerpt_is_not_mislocated(repo, tmp_path):
         def generate(self, system, user, schema, timeout):
             reply = super().generate(system, user, schema, timeout)
             data = json.loads(user.split("\n上次输出")[0])
-            if data.get("prompt_version") == "evidence-reading-1.2" and data["documents"]:
+            if data.get("prompt_version") == "evidence-reading-1.3" and data["documents"]:
                 value = json.loads(reply.content)
                 value["citations"][0]["quote"] = "重复依据"
                 return ModelReply(content=json.dumps(value), input_tokens=100, output_tokens=100)
@@ -261,7 +261,7 @@ def test_planning_repair_receives_safe_constraint_and_reports_progress(repo, tmp
             self.plan_calls = 0
 
         def generate(self, system, user, schema, timeout):
-            if "target-research-1.4" in user:
+            if "target-research-1.5" in user:
                 self.plan_calls += 1
                 if self.plan_calls == 1:
                     bad = plan_data()
@@ -281,6 +281,79 @@ def test_planning_repair_receives_safe_constraint_and_reports_progress(repo, tmp
     assert len(service.events.get(sid).attempts) == 3
 
 
+@pytest.mark.parametrize(
+    ("failure", "hint"),
+    [
+        ("json", "不是有效 JSON"),
+        ("extra", "根对象 含 Schema 未定义的字段"),
+        ("nested_extra", "queries.[0] 含 Schema 未定义的字段"),
+        ("missing", "queries.[0].decision_gap 缺少必填字段"),
+        ("enum", "queries.[0].purpose 必须使用 Schema 列出的枚举值"),
+        ("query", "queries.[0].query：搜索词不能含网址"),
+        ("long_query", "queries.[0].query：搜索词最多120字符"),
+        ("control_query", "queries.[0].query：搜索词不能含换行或控制字符"),
+        ("phone_query", "queries.[0].query：搜索词不能含电话号码"),
+    ],
+)
+@pytest.mark.parametrize("recovers", [True, False])
+def test_planning_repairs_diagnose_without_echoing_payload(repo, tmp_path, failure, hint, recovers):
+    secret = "untrusted-private-value"
+    bad = plan_data()
+    if failure == "extra":
+        bad[secret] = secret
+    elif failure == "nested_extra":
+        bad["queries"][0][secret] = secret
+    elif failure == "missing":
+        del bad["queries"][0]["decision_gap"]
+    elif failure == "enum":
+        bad["queries"][0]["purpose"] = secret
+    elif failure == "query":
+        bad["queries"][0]["query"] = "https://example.com/" + secret
+    elif failure == "long_query":
+        bad["queries"][0]["query"] = secret * 10
+    elif failure == "control_query":
+        bad["queries"][0]["query"] = secret + "\n公开主题"
+    elif failure == "phone_query":
+        bad["queries"][0]["query"] = secret + " 13800138000"
+    content = json.dumps(bad)
+    if failure == "json":
+        content = "```json\n" + content + "\n```" + secret
+
+    class RepairProvider(AssistantProvider):
+        plan_calls = 0
+
+        def generate(self, system, user, schema, timeout):
+            if "target-research-1.5" in user:
+                self.plan_calls += 1
+                if self.plan_calls > 1:
+                    assert hint in user
+                    assert secret not in user
+                if self.plan_calls == 1 or not recovers:
+                    return ModelReply(content=content, input_tokens=1, output_tokens=1)
+            return super().generate(system, user, schema, timeout)
+
+    provider = RepairProvider()
+    service, sid = setup(repo, tmp_path, provider)
+    messages = []
+    if recovers:
+        assert service.prepare(sid, progress=messages.append).stage == "planned"
+        assert provider.plan_calls == 2
+    else:
+        with pytest.raises(AppError) as error:
+            service.prepare(sid, progress=messages.append)
+        assert hint in str(error.value)
+        assert secret not in str(error.value)
+        assert provider.plan_calls == 3
+        assert repo.load(sid).status == "FAILED"
+        assert repo.load(sid).assistance.plan is None
+    assert any(hint in message for message in messages)
+    assert all(secret not in message for message in messages)
+    session = repo.load(sid)
+    assert len(session.attempts) == provider.plan_calls + 1
+    assert session.attempts[1].error_code == "invalid_output"
+    assert session.consumed_tokens > 0
+
+
 def test_explicit_target_is_exposed_verbatim_with_json_window(repo, tmp_path):
     from conftest import complete_question
 
@@ -298,7 +371,7 @@ def test_explicit_target_is_exposed_verbatim_with_json_window(repo, tmp_path):
     class ExplicitTargetProvider(AssistantProvider):
         def generate(self, system, user, schema, timeout):
             data = json.loads(user)
-            if data.get("prompt_version") == "target-research-1.4":
+            if data.get("prompt_version") == "target-research-1.5":
                 assert data["locked_target"] == locked
                 assert "逐字复制" in system
                 self.plan = {**plan_data(), **locked}
@@ -359,7 +432,7 @@ def test_resume_after_followup_reexamines_evidence(repo, tmp_path, monkeypatch):
         service.execute(sid, allow_search=True)
     assert service.state(sid).reading is None
     service.execute(sid, allow_search=True)
-    readings = [p for p in provider.calls if p.get("prompt_version") == "evidence-reading-1.2"]
+    readings = [p for p in provider.calls if p.get("prompt_version") == "evidence-reading-1.3"]
     assert len(readings) == 2
     assert readings[-1]["allowed_followup_indexes"] == []
 
@@ -394,7 +467,7 @@ def test_research_clarification_persists_and_skip_uses_same_allowance(repo, tmp_
             reply = super().generate(system, user, schema, timeout)
             data = json.loads(user.split("\n上次输出")[0])
             if (
-                data.get("prompt_version") == "evidence-reading-1.2"
+                data.get("prompt_version") == "evidence-reading-1.3"
                 and data["clarification_available"]
             ):
                 output = json.loads(reply.content)
@@ -458,7 +531,7 @@ def test_one_clarification_round_skip_survives_reopen(repo, tmp_path):
     result = service.execute(sid)
     assert result.event.unknowns
     assert repo.load(sid).assistance.clarification_answer
-    plans = [p for p in provider.calls if p.get("prompt_version") == "target-research-1.4"]
+    plans = [p for p in provider.calls if p.get("prompt_version") == "target-research-1.5"]
     assert [p["clarification_available"] for p in plans] == [True, False]
     with pytest.raises(AppError):
         service.answer(sid, "不再接受第二轮自动追问")
@@ -535,7 +608,7 @@ def test_fixed_past_window_is_not_shifted(repo, tmp_path):
 
 
 def test_interrupted_planning_requires_explicit_recovery(repo, tmp_path):
-    provider = AssistantProvider(interrupt="target-research-1.4")
+    provider = AssistantProvider(interrupt="target-research-1.5")
     service, sid = setup(repo, tmp_path, provider)
     with pytest.raises(KeyboardInterrupt):
         service.prepare(sid)
@@ -725,3 +798,62 @@ def test_cancelled_research_remains_visible_after_final_revision(repo, tmp_path)
     result = service.execute(sid)
     assert any("research_cancelled" in gap for gap in result.assessment.limitations)
     assert result.probabilities == [None, None]
+
+
+@pytest.mark.parametrize("query", ["AI 2026-10-29 发布", "AI 2026 2036 就业"])
+def test_date_query_reaches_planned_without_repair(repo, tmp_path, query):
+    plan = plan_data()
+    plan["queries"][0]["query"] = query
+    provider = AssistantProvider(plan=plan)
+    service, sid = setup(repo, tmp_path, provider)
+    assert service.prepare(sid).plan.queries[0].query == query
+    assert len(repo.load(sid).attempts) == 2
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_followup_query_repair_has_field_reason_and_never_searches_invalid(
+    repo, tmp_path, recovers
+):
+    class RepairProvider(DynamicQueryProvider):
+        reading_calls = 0
+
+        def generate(self, system, user, schema, timeout):
+            data = json.loads(user.split("\n上次输出")[0])
+            if data.get("prompt_version") == "evidence-reading-1.3" and data.get(
+                "allow_new_followup_queries"
+            ):
+                self.reading_calls += 1
+                assert schema["$defs"]["PlannedQuery"]["properties"]["query"]["maxLength"] == 120
+                assert "最多120字符" in system
+                if self.reading_calls > 1:
+                    assert "followup_queries.[0].query：搜索词不能含邮箱" in user
+                    assert "private@example.com" not in user
+                reply = super().generate(system, user, schema, timeout)
+                if self.reading_calls == 1 or not recovers:
+                    value = json.loads(reply.content)
+                    value["followup_queries"][0]["query"] = "private@example.com"
+                    return ModelReply(content=json.dumps(value), input_tokens=1, output_tokens=1)
+                return reply
+            return super().generate(system, user, schema, timeout)
+
+    provider = RepairProvider()
+    search = SearchFixture()
+    service, sid = setup(repo, tmp_path, provider, search)
+    with pytest.raises(AppError, match="等待用户授权" if recovers else "搜索词不能含邮箱"):
+        service.execute(sid, allow_search=True)
+    assert provider.reading_calls == (2 if recovers else 3)
+    assert not any("@" in q for q in search.queries)
+    assert service.state(sid).reading is not None if recovers else repo.load(sid).status == "FAILED"
+
+
+def test_query_schema_prompt_and_legacy_search_plan_compatibility():
+    from future_agent.domain.research import SearchPlan
+    from future_agent.prompts.assistance import PLAN_SYSTEM, READING_SYSTEM
+
+    for contract in (AnalysisPlan, EvidenceReading):
+        field = contract.model_json_schema()["$defs"]["PlannedQuery"]["properties"]["query"]
+        assert field["maxLength"] == 120
+        assert "私人信息" in field["description"]
+    assert "最多120字符" in PLAN_SYSTEM and "最多120字符" in READING_SYSTEM
+    versions = SearchPlan.model_fields["planner_version"].annotation.__args__
+    assert "target-research-1.4" in versions and "target-research-1.5" in versions

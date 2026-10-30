@@ -26,7 +26,7 @@ from future_agent.domain.contracts import Contract, now
 from future_agent.domain.events import EventDraft, ForecastQuestion, transition
 from future_agent.domain.evidence import EvidenceSpan
 from future_agent.domain.forecasts import Forecast, ForecastSpec, OutcomeDefinition
-from future_agent.domain.research import SearchPlan, SearchQuery, public_terms
+from future_agent.domain.research import PUBLIC_QUERY_RULES, SearchPlan, SearchQuery, public_terms
 from future_agent.prompts.assistance import (
     PLAN_SYSTEM,
     PLAN_VERSION,
@@ -38,9 +38,10 @@ T = TypeVar("T", bound=Contract)
 MAX_BODY_CHARS = 24000
 
 
-def plan_repair_hint(exc: Exception) -> str:
+def plan_repair_hint(exc: Exception, contract: type[Contract] = AnalysisPlan) -> str:
     """Give only fixed rules and schema field names, never model-supplied values."""
     rules = {
+        *PUBLIC_QUERY_RULES.values(),
         "绝对窗口必须同时提供起止时间",
         "绝对窗口顺序错误",
         "结果键重复",
@@ -50,17 +51,63 @@ def plan_repair_hint(exc: Exception) -> str:
         "整次分析的澄清机会已用完",
         "不得改写原文已明确的目标、窗口或规则",
         "无法定义目标须提供原因",
+        "时间必须包含时区",
+        "文本不能为空白",
     }
     if isinstance(exc, ValidationError):
         hints = []
+        schema = contract.model_json_schema()
         for error in exc.errors(include_url=False, include_input=False):
+            if error["type"] == "json_invalid":
+                hints.append(
+                    "输出不是有效 JSON：只返回一个 JSON 对象，"
+                    "不要 Markdown 代码围栏、解释或思考文本"
+                )
+                continue
+            # Resolve only schema-owned names; extra keys and dict keys are untrusted.
+            node, path = schema, []
+            for part in error["loc"]:
+                if "$ref" in node:
+                    node = schema["$defs"][node["$ref"].rsplit("/", 1)[-1]]
+                if isinstance(part, int) and node.get("type") == "array":
+                    path.append(f"[{part}]")
+                    node = node["items"]
+                elif isinstance(part, str) and part in node.get("properties", {}):
+                    path.append(part)
+                    node = node["properties"][part]
+                else:
+                    break
+            location = ".".join(path) or "根对象"
             context = error.get("ctx", {}).get("error")
             if context is not None and str(context) in rules:
-                hints.append(str(context))
-            elif error.get("loc") and error["loc"][0] in AnalysisPlan.model_fields:
-                hints.append(f"字段 {error['loc'][0]} 不符合 Schema，请检查类型、必填项和数量限制")
+                hints.append(f"{location}：{context}")
+            elif error["type"] == "extra_forbidden":
+                hints.append(f"{location} 含 Schema 未定义的字段，请删除额外字段")
+            elif error["type"] == "missing":
+                hints.append(f"{location} 缺少必填字段，请按 Schema 补齐")
+            elif error["type"] == "literal_error":
+                hints.append(f"{location} 必须使用 Schema 列出的枚举值")
+            else:
+                hints.append(f"{location} 不符合 Schema，请检查类型、必填项、范围和数量限制")
         return "；".join(dict.fromkeys(hints[:5]))
     return str(exc) if str(exc) in rules else ""
+
+
+def validate_public_queries(queries: list[PlannedQuery], field: str) -> None:
+    errors = []
+    for index, query in enumerate(queries):
+        try:
+            public_terms(query.query)
+        except ValueError as exc:
+            errors.append(
+                {
+                    "type": "value_error",
+                    "loc": (field, index, "query"),
+                    "ctx": {"error": exc},
+                }
+            )
+    if errors:
+        raise ValidationError.from_exception_data("PublicQueries", errors)
 
 
 class AssistanceService:
@@ -121,7 +168,7 @@ class AssistanceService:
             contract.model_json_schema(),
             check,
             progress=progress,
-            repair_hint=plan_repair_hint if contract is AnalysisPlan else lambda _: "",
+            repair_hint=lambda exc: plan_repair_hint(exc, contract),
         )
         self.sessions.save(transition(active, "NEEDS_INPUT"), active.version)
         return result
@@ -179,8 +226,7 @@ class AssistanceService:
         def validate(plan: AnalysisPlan) -> None:
             if state.clarification_used and plan.questions:
                 raise ValueError("整次分析的澄清机会已用完")
-            for query in plan.queries:
-                public_terms(query.query)
+            validate_public_queries(plan.queries, "queries")
             if event.question and event.semantic_review != "system_reviewed":
                 for name in (
                     "question",
@@ -447,8 +493,8 @@ class AssistanceService:
                 ):
                     raise ValueError("新增查询仅能在首轮研究后单独提出")
                 seen_queries = {q.query.casefold().strip() for q in state.plan.queries}
+                validate_public_queries(value.followup_queries, "followup_queries")
                 for query in value.followup_queries:
-                    public_terms(query.query)
                     key = query.query.casefold().strip()
                     if key in seen_queries:
                         raise ValueError("新增查询不得重复已有查询")

@@ -1,6 +1,8 @@
 """Search plans and durable research accounting, bound to immutable event revisions."""
 
 import re
+import unicodedata
+from datetime import date
 from typing import Literal
 from uuid import UUID, uuid4
 
@@ -10,6 +12,15 @@ from future_agent.domain.contracts import Contract, Text, UtcTime, now
 
 DEFAULT_MAX_SEARCH_QUERIES = 8
 DEFAULT_MAX_PAGES = 16
+MAX_PUBLIC_QUERY_CHARS = 120
+PUBLIC_QUERY_RULES = {
+    "empty": "搜索词不能为空白",
+    "length": f"搜索词最多{MAX_PUBLIC_QUERY_CHARS}字符，请精简为公开主题关键词",
+    "control": "搜索词不能含换行或控制字符，请改为单行关键词",
+    "url": "搜索词不能含网址，请改用公开实体名称和主题关键词",
+    "email": "搜索词不能含邮箱或@标记，请移除联系方式",
+    "phone": "搜索词不能含电话号码或连续长数字，请移除联系方式",
+}
 
 
 class SearchQuery(Contract):
@@ -30,6 +41,7 @@ class SearchPlan(Contract):
         "target-research-1.2",
         "target-research-1.3",
         "target-research-1.4",
+        "target-research-1.5",
     ] = "search-rules-1.0"
     cutoff: UtcTime
     queries: list[SearchQuery] = Field(min_length=1, max_length=4)
@@ -40,13 +52,35 @@ class SearchPlan(Contract):
 
 def public_terms(value: str) -> str:
     """Accept an explicit public topic, never derive a query from personal narratives."""
-    if (
-        not value.strip()
-        or len(value) > 120
-        or re.search(r"[@\r\n]|https?://|\b\d{7,}\b|(?:\+?\d[ -]?){7,}", value)
-        or any(ord(char) < 32 for char in value)
-    ):
-        raise ValueError("请提供简短公开对象，不含网址、邮箱、电话或私人叙述")
+    reason = None
+    if not value.strip():
+        reason = "empty"
+    elif len(value) > MAX_PUBLIC_QUERY_CHARS:
+        reason = "length"
+    elif any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in value):
+        reason = "control"
+    elif re.search(r"https?://|www\.", value, re.IGNORECASE):
+        reason = "url"
+    elif "@" in value:
+        reason = "email"
+    else:
+        # Check whole numeric runs: never erase date substrings inside a phone number.
+        for match in re.finditer(r"\+?\d(?:[ -]?\d)*", value):
+            number = match.group()
+            if sum(char.isdigit() for char in number) < 7:
+                continue
+            if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", number):
+                try:
+                    date.fromisoformat(number)
+                    continue
+                except ValueError:
+                    pass
+            if re.fullmatch(r"(?:19|20|21)[0-9]{2}[ -](?:19|20|21)[0-9]{2}", number):
+                continue
+            reason = "phone"
+            break
+    if reason:
+        raise ValueError(PUBLIC_QUERY_RULES[reason])
     return value.strip()
 
 

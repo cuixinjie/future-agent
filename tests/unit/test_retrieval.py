@@ -380,3 +380,42 @@ def test_search_http_errors_redacted(status, code):
 def test_queries_reject_obvious_personal_identifiers(value):
     with pytest.raises(ValueError):
         public_terms(value)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "AI 2026-10-29 发布",
+        "AI 2024-02-29 发布",
+        "AI 2026 2036 就业",
+        "AI 2026-2036 就业",
+        "公开主题 " + "字" * 115,
+    ],
+)
+def test_public_queries_allow_dates_and_length_boundary(query):
+    assert public_terms(query) == query
+
+
+@pytest.mark.parametrize(
+    ("query", "reason"),
+    [
+        ("字" * 121, "最多120字符"),
+        ("HTTP://example.com", "网址"),
+        ("www.example.com", "网址"),
+        ("me@example.com", "邮箱"),
+        ("a\nb", "控制字符"),
+        ("a\tb", "控制字符"),
+        ("a\x7fb", "控制字符"),
+        ("a\u200bb", "控制字符"),
+        ("a\u2028b", "控制字符"),
+        ("13800138000", "电话"),
+        ("+86 138 0013 8000", "电话"),
+        ("010-12345678", "电话"),
+        ("2026-10-29-1234", "电话"),
+        ("1234-2026-10-29", "电话"),
+        ("2026-02-30", "电话"),
+    ],
+)
+def test_public_queries_report_specific_safe_reason(query, reason):
+    with pytest.raises(ValueError, match=reason):
+        public_terms(query)

@@ -180,6 +180,7 @@ class ModelCalls:
                     raise AppError(
                         "模型输出未通过结构、引用或语义规则；"
                         + ("两次修复仍失败" if max_repairs == 2 else "不再修复")
+                        + (f"。校验原因：{hint}" if hint else "")
                     ) from None
                 repairs += 1
                 hint = repair_hint(exc)
