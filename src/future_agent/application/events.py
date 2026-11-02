@@ -56,6 +56,9 @@ class EventService:
     def get(self, session_id: UUID) -> AnalysisSession:
         return self.repository.load(session_id)
 
+    def delete(self, session_id: UUID) -> None:
+        self.repository.delete_session(session_id)
+
     def list_sessions(self) -> list[AnalysisSession]:
         return self.repository.list_sessions()
 

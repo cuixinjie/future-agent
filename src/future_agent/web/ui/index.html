@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="referrer" content="no-referrer" />
+    <title>预测未来 · 本地预测助手</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">跳到主要内容</a>
+    <div class="shell">
+      <aside class="sidebar" id="sidebar" aria-label="会话">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <h1>预测未来</h1>
+            <p>本地预测助手</p>
+          </div>
+        </div>
+        <button class="button primary block" id="new-session" type="button">
+          <span aria-hidden="true">＋</span> 新建预测
+        </button>
+        <nav class="sessions" aria-label="历史会话">
+          <p class="section-label">会话</p>
+          <div id="session-list" class="session-list">
+            <p class="empty-hint">还没有会话。</p>
+          </div>
+        </nav>
+        <div class="service-status" id="status" aria-live="polite"></div>
+      </aside>
+
+      <main class="main" id="main" tabindex="-1">
+        <header class="topbar">
+          <button
+            class="icon-button"
+            id="toggle-sidebar"
+            type="button"
+            aria-label="显示会话列表"
+            aria-expanded="false"
+            aria-controls="sidebar"
+          >
+            <span aria-hidden="true">☰</span>
+          </button>
+          <span class="topbar-title">预测未来</span>
+        </header>
+        <div class="scroller">
+          <div class="view" id="view" aria-live="polite"></div>
+        </div>
+      </main>
+    </div>
+    <div class="scrim" id="scrim" hidden></div>
+    <noscript>
+      <p class="noscript">此界面需要启用 JavaScript。</p>
+    </noscript>
+    <script src="/assets/app.js" type="module"></script>
+  </body>
+</html>

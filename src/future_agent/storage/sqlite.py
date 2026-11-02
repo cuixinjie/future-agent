@@ -5,7 +5,7 @@ from uuid import UUID
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, select, update
+from sqlalchemy import create_engine, delete, inspect, select, update
 from sqlalchemy.engine import URL
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -66,6 +66,39 @@ class SQLiteRepository:
                 key=lambda session: (session.created_at, str(session.id)),
                 reverse=True,
             )
+
+    def delete_session(self, session_id: UUID) -> None:
+        """Delete an idle, unfrozen analysis atomically; shared files stay intact."""
+        with Session(self.engine) as db, db.begin():
+            row = db.get(SessionRow, str(session_id))
+            if row is None:
+                raise NotFound("会话不存在")
+            value = AnalysisSession.model_validate_json(row.payload)
+            if value.status in {"READING", "FORECASTING"} or any(
+                run.status == "running" for run in value.research_runs
+            ):
+                raise Conflict("请先恢复或终止中断步骤，再删除会话")
+            revisions = select(RevisionRow.id).where(RevisionRow.session_id == str(session_id))
+            forecasts = select(ForecastRow.id).where(ForecastRow.event_revision_id.in_(revisions))
+            if db.scalar(
+                select(FrozenForecastRow.forecast_id)
+                .where(FrozenForecastRow.forecast_id.in_(forecasts))
+                .limit(1)
+            ):
+                raise Conflict("会话包含冻结预测，不能删除封存历史")
+            if any(
+                str(session_id) in payload
+                for payload in db.scalars(select(EvaluationRunRow.payload))
+            ):
+                raise Conflict("会话已关联实验，不能删除实验输入")
+            documents = select(EvidenceRow.id).where(EvidenceRow.event_revision_id.in_(revisions))
+            db.execute(delete(ForecastStepRow).where(ForecastStepRow.session_id == str(session_id)))
+            db.execute(delete(ForecastRow).where(ForecastRow.event_revision_id.in_(revisions)))
+            db.execute(delete(AssessmentRow).where(AssessmentRow.event_revision_id.in_(revisions)))
+            db.execute(delete(EvidenceSpanRow).where(EvidenceSpanRow.document_id.in_(documents)))
+            db.execute(delete(EvidenceRow).where(EvidenceRow.event_revision_id.in_(revisions)))
+            db.execute(delete(RevisionRow).where(RevisionRow.session_id == str(session_id)))
+            db.delete(row)
 
     def save_forecast(
         self,

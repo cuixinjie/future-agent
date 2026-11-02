@@ -422,7 +422,13 @@ class AssistanceService:
                 research_gaps=[*state.research_gaps, "用户未授权新增补充查询"],
             )
 
-    def _reading(self, sid: UUID, allowed_followups: list[int]) -> EvidenceReading:
+    def _reading(
+        self,
+        sid: UUID,
+        allowed_followups: list[int],
+        *,
+        progress: Callable[[str], None] = lambda _: None,
+    ) -> EvidenceReading:
         state, event = self.state(sid), self.events.revision(sid)
         research_gaps = list(state.research_gaps)
         for run in self.sessions.load(sid).research_runs:
@@ -522,6 +528,7 @@ class AssistanceService:
             },
             EvidenceReading,
             validate,
+            progress=progress,
         )
         gaps = [*self.state(sid).research_gaps]
         if truncated:
@@ -537,8 +544,14 @@ class AssistanceService:
         )
         return reading
 
-    def execute(self, sid: UUID, *, allow_search: bool = False) -> Forecast:
-        state = self.prepare(sid)
+    def execute(
+        self,
+        sid: UUID,
+        *,
+        allow_search: bool = False,
+        progress: Callable[[str], None] = lambda _: None,
+    ) -> Forecast:
+        state = self.prepare(sid, progress=progress)
         if state.forecast_id:
             return self.forecasts.get(state.forecast_id)
         if state.final_revision is not None:
@@ -566,6 +579,7 @@ class AssistanceService:
             approved = [q.query for q in queries] if allow_search else []
             self._save(sid, approved_queries=approved, stage="reviewing")
             if allow_search and queries and self.research.search and self.research.pages:
+                progress("正在搜索并抓取正文；单轮研究最多120秒。")
                 self._research(sid, list(range(min(2, len(queries)))))
             else:
                 self._save(sid, research_gaps=["本次未联网或未配置搜索；仅使用已有资料与明确假设"])
@@ -587,7 +601,8 @@ class AssistanceService:
                 if state.approved_queries and state.research_rounds == 1
                 else []
             )
-            reading = state.reading or self._reading(sid, followups)
+            progress("正在分析正文与引用。")
+            reading = state.reading or self._reading(sid, followups, progress=progress)
             if reading.followup_queries and self.state(sid).research_rounds == 1:
                 self._save(
                     sid, stage="search_authorization", pending_queries=reading.followup_queries
@@ -596,8 +611,9 @@ class AssistanceService:
             if reading.followup_query_indexes and self.state(sid).research_rounds == 1:
                 # A resumed run must not reuse the reading from before the follow-up.
                 self._save(sid, reading=None)
+                progress("正在补充搜索并抓取正文；单轮研究最多120秒。")
                 self._research(sid, reading.followup_query_indexes)
-                reading = self._reading(sid, [])
+                reading = self._reading(sid, [], progress=progress)
             current = self.state(sid)
             failed_network = any(
                 attempt.status == "failed"
@@ -694,6 +710,7 @@ class AssistanceService:
         if request_id is None:
             request_id = uuid4()
             self._save(sid, forecast_request_id=request_id)
+        progress("正在生成最终判断；模型单次请求最多60秒。")
         result = self.forecasts.run(
             sid,
             state.final_revision,
@@ -709,6 +726,7 @@ class AssistanceService:
             ),
             numeric=numeric,
             request_id=request_id,
+            progress=progress,
         )
         self._save(
             sid, stage="complete", forecast_id=result.id, event_revision=result.event.revision

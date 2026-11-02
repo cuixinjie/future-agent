@@ -1,6 +1,7 @@
 """T09 prediction use case; no provider or database implementation dependencies."""
 
 import json
+from collections.abc import Callable
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -72,6 +73,7 @@ class ForecastService:
         numeric: bool = False,
         request_id: UUID | None = None,
         _step: ForecastStep | None = None,
+        progress: Callable[[str], None] = lambda _: None,
     ) -> Forecast:
         if request_id is not None and _step is None:
             try:
@@ -181,6 +183,7 @@ class ForecastService:
             forecast_schema(assisted=assisted),
             validate,
             cancelled=lambda: self.repository.step(step.id).status == "cancelled",
+            progress=progress,
         )
         # Recheck snapshot integrity and version dependencies after an external call.
         try:

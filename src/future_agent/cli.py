@@ -75,6 +75,10 @@ def make_parser() -> argparse.ArgumentParser:
     doctor_command.add_argument(
         "--live", action="store_true", help="最多两次真实模型调用，可能产生费用"
     )
+    web = commands.add_parser("web", help="本地 Web 界面：单用户、单进程，复用同一应用服务")
+    web.add_argument("--host", default="127.0.0.1", help="仅允许本机回环地址")
+    web.add_argument("--port", type=int, default=8765, help="监听端口，默认 8765")
+    web.add_argument("--no-browser", action="store_true", help="启动后不自动打开浏览器")
     schema = commands.add_parser("schema", help="输出 JSON Schema")
     schema.add_argument(
         "kind",
@@ -442,6 +446,11 @@ def main() -> int:
             provider = CompatibleProvider(settings)
         if args.command == "doctor":
             doctor(settings, args.live, provider)
+            return 0
+        if args.command == "web":
+            from future_agent.web import run_web
+
+            run_web(settings, host=args.host, port=args.port, open_browser=not args.no_browser)
             return 0
         repo = SQLiteRepository(settings.database_path())
         repo.migrate()
