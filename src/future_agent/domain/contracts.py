@@ -1,5 +1,7 @@
 """Shared versioned contract primitives, without workflow dependencies."""
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
@@ -29,3 +31,9 @@ def now() -> datetime:
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
     schema_version: Literal["1.0"] = "1.0"
+
+
+def fingerprint(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()

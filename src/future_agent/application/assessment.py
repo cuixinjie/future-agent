@@ -88,11 +88,18 @@ class AssessmentService:
             critical_unknowns=bool(review.critical_questions),
             allow_numeric=review.allow_numeric,
         )
+        if review.defer_delivery_choice and (experiment or review.numeric_basis is None):
+            raise AppError("最终交付选择仅用于具备依据评估的新版普通分析")
         if review.numeric_basis is not None:
             if experiment:
                 raise AppError("自动主观判断资格仅用于普通分析，不能改变旧实验规则")
             basis = review.numeric_basis
-            supported = basis.status == "supported" and review.allow_numeric
+            supported = (
+                basis.status == "supported"
+                or (review.defer_delivery_choice and basis.status == "conditional_only")
+            ) and review.allow_numeric
+            if basis.source_kind == "none":
+                supported = False
             if basis.source_kind == "external" and not review.evidence:
                 supported = False
             if basis.source_kind == "user_report" and not event.claims:
@@ -117,7 +124,13 @@ class AssessmentService:
         if unknowns:
             gaps.append("current_unknowns_preserved")
         assessment = EvidenceAssessment(
-            assessor_version="evidence-assessor-2.0" if review.numeric_basis else ASSESSOR_VERSION,
+            assessor_version=(
+                "evidence-assessor-2.1"
+                if review.defer_delivery_choice
+                else "evidence-assessor-2.0"
+                if review.numeric_basis
+                else ASSESSOR_VERSION
+            ),
             session_id=sid,
             event_revision_id=event.id,
             revision=revision,
@@ -164,7 +177,11 @@ class AssessmentService:
         for assessment in self.repository.assessments(event.id):
             reasons = []
             expected_version = (
-                "evidence-assessor-2.0" if assessment.review.numeric_basis else ASSESSOR_VERSION
+                "evidence-assessor-2.1"
+                if assessment.review.defer_delivery_choice
+                else "evidence-assessor-2.0"
+                if assessment.review.numeric_basis
+                else ASSESSOR_VERSION
             )
             if assessment.assessor_version != expected_version:
                 reasons.append("assessor_version_changed")

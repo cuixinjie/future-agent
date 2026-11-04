@@ -88,13 +88,13 @@ class AssistantProvider:
                         "cannot_research_reason": "私人项目未知",
                     }
                 ]
-        elif version == "evidence-reading-1.3":
+        elif version == "evidence-reading-1.5":
             documents = data["documents"]
             output = {
                 "citations": [
                     {
                         "document_id": d["document_id"],
-                        "quote": "编造的原文" if self.bad_quote else d["body"],
+                        "quote": "编造的原文" if self.bad_quote else d["passages"][0]["body"],
                         "purpose": "current_state",
                         "relevance_reason": "说明发布进度",
                     }
@@ -113,9 +113,21 @@ class AssistantProvider:
                 "followup_query_indexes": data["allowed_followup_indexes"] if self.followup else [],
             }
         elif "spec" in data:
-            numeric = data["method"] == "llm_judgment"
+            numeric = data["method"] == "llm_judgment" and self.numeric
             output = forecast_response((0.7, 0.3) if numeric else (None, None))
             output["schema_version"] = "2.0"
+            if not numeric and data["method"] == "llm_judgment":
+                output["refusal_reason"] = "无法解释总体数字的调整，保留定性判断"
+            output["decision_review"] = {
+                "strongest_counterargument": "兼容性阻塞可能持续超过窗口",
+                "synthesis_reason": "现有准备进度提供方向线索，缺少可靠的进度量化",
+                "conditional_factors": [
+                    "阻塞在近期解决则更支持按期发布",
+                    "阻塞依赖上游长期改动则更支持延后",
+                ]
+                if self.delivery == "conditional"
+                else [],
+            }
             mode = self.delivery or ("probability" if numeric else "directional")
             decisive = mode in {"probability", "directional"}
             output["judgment"] = {
@@ -163,7 +175,7 @@ class DynamicQueryProvider(AssistantProvider):
     def generate(self, system, user, schema, timeout):
         reply = super().generate(system, user, schema, timeout)
         data = json.loads(user.split("\n上次输出")[0])
-        if data.get("prompt_version") == "evidence-reading-1.3" and data.get(
+        if data.get("prompt_version") == "evidence-reading-1.5" and data.get(
             "allow_new_followup_queries"
         ):
             value = json.loads(reply.content)
@@ -203,7 +215,7 @@ def test_new_followup_with_private_contact_is_rejected_before_network(repo, tmp_
         def generate(self, system, user, schema, timeout):
             reply = super().generate(system, user, schema, timeout)
             data = json.loads(user.split("\n上次输出")[0])
-            if data.get("prompt_version") == "evidence-reading-1.3" and data.get(
+            if data.get("prompt_version") == "evidence-reading-1.5" and data.get(
                 "allow_new_followup_queries"
             ):
                 value = json.loads(reply.content)
@@ -223,7 +235,7 @@ def test_quote_repeated_outside_excerpt_is_not_mislocated(repo, tmp_path):
         def generate(self, system, user, schema, timeout):
             reply = super().generate(system, user, schema, timeout)
             data = json.loads(user.split("\n上次输出")[0])
-            if data.get("prompt_version") == "evidence-reading-1.3" and data["documents"]:
+            if data.get("prompt_version") == "evidence-reading-1.5" and data["documents"]:
                 value = json.loads(reply.content)
                 value["citations"][0]["quote"] = "重复依据"
                 return ModelReply(content=json.dumps(value), input_tokens=100, output_tokens=100)
@@ -392,7 +404,7 @@ def test_ordinary_analysis_no_forms_and_no_repeat_calls(repo, tmp_path):
     service, sid = setup(repo, tmp_path, provider)
     result = service.execute(sid)
     assert len(provider.calls) == 4
-    assert result.method_version == "judgment-2.0"
+    assert result.method_version == "judgment-2.1"
     assert result.draft.judgment.delivery == "directional" and result.probabilities == [None, None]
     assert result.event.semantic_review == "system_reviewed"
     assert not result.assessment.experiment
@@ -409,7 +421,7 @@ def test_numeric_can_use_concrete_user_information_with_unknowns(repo, tmp_path)
     service, sid = setup(repo, tmp_path, AssistantProvider(numeric=True))
     result = service.execute(sid)
     assert result.probabilities == [0.7, 0.3] and result.event.unknowns
-    assert result.assessment.assessor_version == "evidence-assessor-2.0"
+    assert result.assessment.assessor_version == "evidence-assessor-2.1"
     assert result.draft.judgment.delivery == "probability"
     report = ResolutionService(repo, repo, service.evidence).report(result.id)
     summary = report.split("预测报告（", 1)[0]
@@ -422,8 +434,8 @@ def test_resume_after_followup_reexamines_evidence(repo, tmp_path, monkeypatch):
     service, sid = setup(repo, tmp_path, provider, SearchFixture())
     research = service._research
 
-    def interrupt_after_followup(session_id, indexes):
-        research(session_id, indexes)
+    def interrupt_after_followup(session_id, indexes, **kwargs):
+        research(session_id, indexes, **kwargs)
         if service.state(session_id).research_rounds == 2:
             raise KeyboardInterrupt
 
@@ -432,7 +444,7 @@ def test_resume_after_followup_reexamines_evidence(repo, tmp_path, monkeypatch):
         service.execute(sid, allow_search=True)
     assert service.state(sid).reading is None
     service.execute(sid, allow_search=True)
-    readings = [p for p in provider.calls if p.get("prompt_version") == "evidence-reading-1.3"]
+    readings = [p for p in provider.calls if p.get("prompt_version") == "evidence-reading-1.5"]
     assert len(readings) == 2
     assert readings[-1]["allowed_followup_indexes"] == []
 
@@ -467,7 +479,7 @@ def test_research_clarification_persists_and_skip_uses_same_allowance(repo, tmp_
             reply = super().generate(system, user, schema, timeout)
             data = json.loads(user.split("\n上次输出")[0])
             if (
-                data.get("prompt_version") == "evidence-reading-1.3"
+                data.get("prompt_version") == "evidence-reading-1.5"
                 and data["clarification_available"]
             ):
                 output = json.loads(reply.content)
@@ -781,7 +793,7 @@ def test_saved_judgment_cannot_relabel_target_or_use_old_assessment(repo, tmp_pa
         Forecast.model_validate(data)
     data = result.model_dump(mode="json")
     data["assessment"]["assessor_version"] = "evidence-assessor-1.2"
-    with pytest.raises(ValueError, match="新版普通评估"):
+    with pytest.raises(ValueError, match="交付选择策略与评估版本不一致"):
         Forecast.model_validate(data)
 
 
@@ -819,7 +831,7 @@ def test_followup_query_repair_has_field_reason_and_never_searches_invalid(
 
         def generate(self, system, user, schema, timeout):
             data = json.loads(user.split("\n上次输出")[0])
-            if data.get("prompt_version") == "evidence-reading-1.3" and data.get(
+            if data.get("prompt_version") == "evidence-reading-1.5" and data.get(
                 "allow_new_followup_queries"
             ):
                 self.reading_calls += 1
@@ -857,3 +869,186 @@ def test_query_schema_prompt_and_legacy_search_plan_compatibility():
     assert "最多120字符" in PLAN_SYSTEM and "最多120字符" in READING_SYSTEM
     versions = SearchPlan.model_fields["planner_version"].annotation.__args__
     assert "target-research-1.4" in versions and "target-research-1.5" in versions
+
+
+def test_stop_during_research_preserves_attempts_and_no_forecast(repo, tmp_path):
+    from future_agent.application.network import NetworkError
+
+    service, sid = setup(repo, tmp_path, AssistantProvider(), SearchFixture())
+    service.prepare(sid)
+
+    stopped = False
+
+    def progress(message):
+        nonlocal stopped
+        stopped |= "第1个候选" in message
+        if stopped:
+            raise NetworkError("cancelled")
+
+    with pytest.raises(NetworkError):
+        service.execute(sid, allow_search=True, progress=progress)
+    session = repo.load(sid)
+    assert session.research_runs[-1].status == "cancelled"
+    assert session.research_runs[-1].attempts
+    assert service.state(sid).forecast_id is None
+
+
+def test_first_round_passes_reserved_page_limit(repo, tmp_path, monkeypatch):
+    service, sid = setup(repo, tmp_path, AssistantProvider(), SearchFixture())
+    session = repo.load(sid)
+    repo.save(session.model_copy(update={"max_pages": 4}), session.version)
+    start = service.research.start
+    limits = []
+
+    def record(*args, **kwargs):
+        limits.append(kwargs["page_limit"])
+        return start(*args, **kwargs)
+
+    monkeypatch.setattr(service.research, "start", record)
+    service.execute(sid, allow_search=True)
+    assert limits[0] == 2
+
+
+def test_source_relationship_cannot_reference_unread_document(repo, tmp_path):
+    from uuid import uuid4
+
+    class InvalidRelationshipProvider(AssistantProvider):
+        def generate(self, system, user, schema, timeout):
+            reply = super().generate(system, user, schema, timeout)
+            if (
+                json.loads(user.split("\n上次输出")[0]).get("prompt_version")
+                == "evidence-reading-1.5"
+            ):
+                value = json.loads(reply.content)
+                value["source_relationships"] = [
+                    {
+                        "document_ids": [str(uuid4()), str(uuid4())],
+                        "original_source": None,
+                        "basis": "claimed shared source",
+                    }
+                ]
+                return reply.model_copy(update={"content": json.dumps(value)})
+            return reply
+
+    service, sid = setup(repo, tmp_path, InvalidRelationshipProvider(), SearchFixture())
+    with pytest.raises(AppError, match="结构、引用或语义规则"):
+        service.execute(sid, allow_search=True)
+    assert service.state(sid).forecast_id is None
+
+
+@pytest.mark.parametrize(
+    "status,source,expected",
+    [
+        ("conditional_only", "user_report", True),
+        ("insufficient", "user_report", False),
+        ("conditional_only", "none", False),
+        ("conditional_only", "external", False),
+    ],
+)
+def test_final_judgment_can_reconsider_reading_without_bypassing_source_gate(
+    repo, tmp_path, status, source, expected
+):
+    class ReconsiderProvider(AssistantProvider):
+        def generate(self, system, user, schema, timeout):
+            reply = super().generate(system, user, schema, timeout)
+            data = json.loads(user.split("\n上次输出")[0])
+            if data.get("prompt_version") == "evidence-reading-1.5":
+                value = json.loads(reply.content)
+                value["numeric_basis"].update(status=status, source_kind=source)
+                return ModelReply(content=json.dumps(value), input_tokens=100, output_tokens=100)
+            return reply
+
+    provider = ReconsiderProvider(numeric=True)
+    service, sid = setup(repo, tmp_path, provider)
+    result = service.execute(sid)
+    assert (result.method == "llm_judgment") is expected
+    assert result.probabilities == ([0.7, 0.3] if expected else [None, None])
+    assert len(provider.calls) == 4
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing_review", "internal", "conditional_default", "tautology"]
+)
+@pytest.mark.parametrize("persistent", [False, True])
+def test_decision_review_repairs_are_bounded_and_do_not_save_empty_success(
+    repo, tmp_path, fault, persistent
+):
+    class BrokenReviewProvider(AssistantProvider):
+        broken_calls = 0
+
+        def generate(self, system, user, schema, timeout):
+            reply = super().generate(system, user, schema, timeout)
+            data = json.loads(user.split("\n上次输出")[0])
+            if "spec" not in data:
+                return reply
+            self.broken_calls += 1
+            if not persistent and self.broken_calls > 1:
+                assert "校验" in user
+                return reply
+            value = json.loads(reply.content)
+            if fault == "missing_review":
+                value.pop("decision_review")
+            elif fault == "internal":
+                value["judgment"]["no_numeric_reason"] = "reviewed_evidence为空"
+            elif fault == "conditional_default":
+                value["judgment"]["conclusion"] = "默认分支为否"
+            else:
+                value["decision_review"]["conditional_factors"] = [
+                    o["definition"] for o in data["spec"]["outcomes"]
+                ]
+            return ModelReply(content=json.dumps(value), input_tokens=100, output_tokens=100)
+
+    provider = BrokenReviewProvider(delivery="conditional")
+    service, sid = setup(repo, tmp_path, provider)
+    if persistent:
+        with pytest.raises(AppError, match="两次修复仍失败"):
+            service.execute(sid)
+        assert not service.forecasts.history(sid, service.state(sid).final_revision)
+        assert provider.broken_calls == 3
+        assert repo.load(sid).error_code == "invalid_output"
+    else:
+        result = service.execute(sid)
+        assert result.draft.judgment.delivery == "conditional"
+        assert provider.broken_calls == 2
+        report = ResolutionService(repo, repo, service.evidence).report(result.id)
+        assert "判断边界：" in report and "最强反面解释：" in report
+        from future_agent.web.views import forecast_view
+
+        assert forecast_view(result, None)[
+            "decision_review"
+        ] == result.draft.decision_review.model_dump(mode="json")
+        assert result.draft.decision_review.conditional_factors
+
+
+def test_old_reading_keeps_old_delivery_gate_and_frozen_serialization(repo, tmp_path):
+    from future_agent.domain.lifecycle import FrozenForecast, fingerprint
+
+    provider = AssistantProvider()
+    service, sid = setup(repo, tmp_path, provider)
+    original_read = service._reading
+
+    def old_read(*args, **kwargs):
+        reading = original_read(*args, **kwargs)
+        service._save(sid, reading_version="evidence-reading-1.4")
+        return reading
+
+    service._reading = old_read
+    result = service.execute(sid)
+    assert result.method == "scenario_only"
+    assert result.method_version == "judgment-2.0"
+    assert result.assessment.assessor_version == "evidence-assessor-2.0"
+    # Historical forecasts do not contain either new optional field.
+    raw = result.model_dump(mode="json")
+    raw["draft"].pop("decision_review", None)
+    assert "defer_delivery_choice" not in raw["assessment"]["review"]
+    frozen = FrozenForecast.model_validate(
+        {
+            "forecast": raw,
+            "frozen_at": now(),
+            "input_hash": fingerprint(raw),
+        }
+    )
+    assert frozen.forecast.model_dump(mode="json") == raw
+    assert FrozenForecast.model_validate_json(frozen.model_dump_json()).input_hash == fingerprint(
+        raw
+    )

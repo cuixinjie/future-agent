@@ -309,3 +309,71 @@ def test_forecast_progress_and_stop_discard_late_response(web, monkeypatch):
     assert saved["forecast"] is None
     assert saved["error_code"] == "cancelled"
     assert client.call("POST", f"/api/sessions/{sid}/cancel-forecast", {})[0] == 409
+
+
+@pytest.mark.parametrize("phase", ["planning", "reading"])
+def test_stop_model_phases_retains_cost_and_can_retry(web, monkeypatch, phase):
+    client, application = web
+    sid = client.call("POST", "/api/sessions", {"text": NARRATIVE})[1]["session"]["id"]
+    if phase == "reading":
+        job = client.call("POST", f"/api/sessions/{sid}/prepare", {})[1]["job"]
+        assert client.wait(job["id"])["status"] == "done"
+    entered, release = threading.Event(), threading.Event()
+    generate = application.services.provider.generate
+
+    def blocked(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return generate(*args, **kwargs)
+
+    monkeypatch.setattr(application.services.provider, "generate", blocked)
+    action = "prepare" if phase == "planning" else "execute"
+    job = client.call("POST", f"/api/sessions/{sid}/{action}", {})[1]["job"]
+    try:
+        assert entered.wait(10)
+        assert client.call("POST", f"/api/sessions/{sid}/stop", {})[0] == 200
+        snapshot = client.call("GET", f"/api/jobs/{job['id']}")[1]["job"]
+        assert snapshot["stop_requested"]
+        assert "metrics" in snapshot
+    finally:
+        release.set()
+    assert client.wait(job["id"])["status"] == "failed"
+    saved = client.call("GET", f"/api/sessions/{sid}")[1]["session"]
+    assert saved["forecast"] is None
+    assert saved["assistance"]["budgets"]["calls_used"] > 0
+    monkeypatch.setattr(application.services.provider, "generate", generate)
+    retry = client.call("POST", f"/api/sessions/{sid}/retry", {})[1]["job"]
+    assert client.wait(retry["id"])["status"] == "done"
+
+
+def test_verification_queue_only_due_unresolved_and_disputed(web, monkeypatch):
+    from datetime import timedelta
+
+    from future_agent.domain.contracts import now
+
+    client, application = web
+    sid = client.call("POST", "/api/sessions", {"text": NARRATIVE})[1]["session"]["id"]
+    for action in ("prepare", "execute", "freeze"):
+        job = client.call("POST", f"/api/sessions/{sid}/{action}", {})[1]["job"]
+        assert client.wait(job["id"])["status"] == "done"
+    assert client.call("GET", "/api/sessions")[1]["verification_queue"] == []
+    monkeypatch.setattr(
+        "future_agent.application.lifecycle.now", lambda: now() + timedelta(days=40)
+    )
+    queue = client.call("GET", "/api/sessions")[1]["verification_queue"]
+    assert len(queue) == 1 and queue[0]["session_id"] == sid
+    for status in ("disputed", "void"):
+        detail = client.call("GET", f"/api/sessions/{sid}")[1]["session"]
+        job = client.call(
+            "POST",
+            f"/api/sessions/{sid}/resolve",
+            {
+                "status": status,
+                "resolver": "tester",
+                "reason": "test resolution",
+                "expected_previous": detail["last_resolution_id"],
+            },
+        )[1]["job"]
+        assert client.wait(job["id"])["status"] == "done"
+        queue = client.call("GET", "/api/sessions")[1]["verification_queue"]
+        assert bool(queue) == (status == "disputed")

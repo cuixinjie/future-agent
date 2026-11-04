@@ -5,7 +5,9 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
+from future_agent.domain.case_reference import CaseEstimate, CaseTarget
 from future_agent.domain.contracts import Contract, Text, UtcTime
+from future_agent.domain.reference import ReferenceBinding, ReferenceEstimate, ReferenceTarget
 from future_agent.domain.research import MAX_PUBLIC_QUERY_CHARS
 
 
@@ -33,6 +35,9 @@ class PlannedQuery(Contract):
 
 
 class AnalysisPlan(Contract):
+    reference_target: ReferenceTarget | CaseTarget | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     question: Text | None
     outcome_type: Literal["binary", "categorical", "continuous"] = "binary"
     duration_days: int = Field(default=30, ge=1, le=3660)
@@ -97,7 +102,15 @@ class ExtractedCitation(Contract):
     relevance_reason: Text
 
 
+class SourceRelationship(Contract):
+    document_ids: list[UUID] = Field(min_length=2)
+    original_source: Text | None = None
+    basis: Text
+
+
 class EvidenceReading(Contract):
+    source_relationships: list[SourceRelationship] = Field(default_factory=list, max_length=8)
+    coverage_gaps: list[Text] = Field(default_factory=list, max_length=5)
     questions: list[Clarification] = Field(default_factory=list, max_length=3)
     citations: list[ExtractedCitation] = Field(default_factory=list, max_length=16)
     numeric_basis: NumericBasis
@@ -124,6 +137,10 @@ class JudgmentSummary(Contract):
 
 
 class AssistanceState(Contract):
+    reference_binding: ReferenceBinding | None = Field(default=None, exclude_if=lambda v: v is None)
+    reference_preview: ReferenceEstimate | CaseEstimate | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     """Progress and clarification allowance survive restarts and event revisions."""
 
     source_count: int = Field(default=0, ge=0)

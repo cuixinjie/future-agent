@@ -1,22 +1,16 @@
 """Append-only forecast seals, verification history and resumable step inputs."""
 
-import hashlib
-import json
 from typing import Literal, Self
 from uuid import UUID, uuid4
 
 from pydantic import Field, model_validator
 
 from future_agent.domain.contracts import Contract, Text, UtcTime, now
+from future_agent.domain.contracts import fingerprint as fingerprint
 from future_agent.domain.events import ForecastQuestion
 from future_agent.domain.evidence import EvidenceDocument, EvidenceSpan
 from future_agent.domain.forecasts import PROBABILITY_TOLERANCE, Forecast, ForecastSpec
-
-
-def fingerprint(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+from future_agent.domain.reference import ReferenceBinding
 
 
 class FrozenForecast(Contract):
@@ -161,6 +155,8 @@ def validate_resolution_window(
 
 
 class ForecastStep(Contract):
+    schema_version: Literal["1.0", "1.1", "1.2"] = "1.0"
+    reference_binding: ReferenceBinding | None = Field(default=None, exclude_if=lambda v: v is None)
     id: UUID = Field(default_factory=uuid4)
     session_id: UUID
     revision: int = Field(ge=1)

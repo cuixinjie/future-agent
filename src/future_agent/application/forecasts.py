@@ -14,6 +14,8 @@ from future_agent.application.ports import (
     NotFound,
     SessionRepository,
 )
+from future_agent.application.reference import validate_binding
+from future_agent.domain.case_reference import CaseEstimate
 from future_agent.domain.contracts import now
 from future_agent.domain.events import transition
 from future_agent.domain.forecasts import (
@@ -22,10 +24,20 @@ from future_agent.domain.forecasts import (
     ForecastDraft,
     ForecastSpec,
     forecast_schema,
+    validate_decision_review,
     validate_judgment,
 )
 from future_agent.domain.lifecycle import ForecastStep
-from future_agent.prompts.assistance import JUDGMENT_SYSTEM, JUDGMENT_VERSION
+from future_agent.domain.reference import ReferenceBinding
+from future_agent.prompts.assistance import (
+    BAYESIAN_REFERENCE_JUDGMENT_SYSTEM,
+    CASE_JUDGMENT_SYSTEM,
+    JUDGMENT_SYSTEM,
+    JUDGMENT_VERSION,
+    REFERENCE_JUDGMENT_SYSTEM,
+    USEFUL_JUDGMENT_SYSTEM,
+    USEFUL_JUDGMENT_VERSION,
+)
 from future_agent.prompts.forecast import FORECAST_PROMPT_VERSION, FORECAST_SYSTEM
 
 
@@ -71,6 +83,7 @@ class ForecastService:
         spec: ForecastSpec,
         *,
         numeric: bool = False,
+        reference_binding: ReferenceBinding | None = None,
         request_id: UUID | None = None,
         _step: ForecastStep | None = None,
         progress: Callable[[str], None] = lambda _: None,
@@ -87,6 +100,7 @@ class ForecastService:
                     or saved_step.assessment_id != assessment_id
                     or saved_step.spec != spec
                     or saved_step.numeric != numeric
+                    or saved_step.reference_binding != reference_binding
                 ):
                     raise Conflict("步骤幂等键已用于不同输入")
                 return self.resume(request_id)
@@ -108,10 +122,38 @@ class ForecastService:
             raise Conflict("评估已失效，请重新评估后预测")
         assessment = view.assessment
         assisted = spec.guidance is not None
-        prompt_version = JUDGMENT_VERSION if assisted else FORECAST_PROMPT_VERSION
-        method_version = "judgment-2.0" if assisted else FORECAST_METHOD_VERSION
+        useful = assisted and assessment.assessor_version == "evidence-assessor-2.1"
+        prompt_version = (
+            (USEFUL_JUDGMENT_VERSION if useful else JUDGMENT_VERSION)
+            if assisted
+            else FORECAST_PROMPT_VERSION
+        )
+        method_version = (
+            ("judgment-2.1" if useful else "judgment-2.0") if assisted else FORECAST_METHOD_VERSION
+        )
+        case_reference = reference_binding is not None and isinstance(
+            reference_binding.estimate, CaseEstimate
+        )
+        bayesian_reference = (
+            reference_binding is not None
+            and reference_binding.estimate.method_version == "release-reference-1.2"
+        )
+        if reference_binding is not None:
+            if not useful:
+                raise Conflict("参照仅支持新版普通判断，不改变旧实验")
+            validate_binding(reference_binding, event.id, assessment.cutoff)
+            prompt_version = (
+                "forecast-case-reference-1.0" if case_reference else "forecast-reference-1.0"
+            )
+            method_version = (
+                "judgment-case-reference-1.0" if case_reference else "judgment-reference-1.0"
+            )
+            if bayesian_reference:
+                prompt_version = "forecast-reference-1.1"
+                method_version = "judgment-reference-1.1"
         if assisted and (
-            assessment.experiment or assessment.assessor_version != "evidence-assessor-2.0"
+            assessment.experiment
+            or assessment.assessor_version not in {"evidence-assessor-2.0", "evidence-assessor-2.1"}
         ):
             raise AppError("新版普通分析不能冒用旧实验资格；请使用独立的新协议版本")
         if assisted and now() >= event.question.window_start:
@@ -144,14 +186,18 @@ class ForecastService:
             "sources": [d.model_dump(mode="json") for d in documents],
             "cases": [],
         }
+        if reference_binding is not None:
+            payload["historical_reference"] = reference_binding.estimate.model_dump(mode="json")
         step = _step or self.repository.save_step(
             ForecastStep(
+                schema_version="1.2" if case_reference else "1.1" if reference_binding else "1.0",
                 id=request_id or uuid4(),
                 session_id=sid,
                 revision=revision,
                 assessment_id=assessment_id,
                 spec=spec,
                 numeric=numeric,
+                reference_binding=reference_binding,
                 model_id=self.provider.model_id,
                 structured_mode=self.provider.structured_mode,
                 output_token_limit=self.provider.output_token_limit,
@@ -174,16 +220,36 @@ class ForecastService:
         def validate(content: str) -> ForecastDraft:
             draft = ForecastDraft.model_validate_json(content)
             validate_judgment(draft, spec, method, reviewed_ids)
+            if useful:
+                validate_decision_review(draft, spec)
             return draft
 
         active, draft = ModelCalls(self.sessions, self.provider).run(
             active,
-            JUDGMENT_SYSTEM if assisted else FORECAST_SYSTEM,
+            (
+                (
+                    USEFUL_JUDGMENT_SYSTEM
+                    + (
+                        CASE_JUDGMENT_SYSTEM
+                        if case_reference
+                        else BAYESIAN_REFERENCE_JUDGMENT_SYSTEM
+                        if bayesian_reference
+                        else REFERENCE_JUDGMENT_SYSTEM
+                    )
+                    if reference_binding
+                    else USEFUL_JUDGMENT_SYSTEM
+                )
+                if useful
+                else JUDGMENT_SYSTEM
+            )
+            if assisted
+            else FORECAST_SYSTEM,
             json.dumps(payload, ensure_ascii=False),
-            forecast_schema(assisted=assisted),
+            forecast_schema(assisted=assisted, useful=useful),
             validate,
             cancelled=lambda: self.repository.step(step.id).status == "cancelled",
             progress=progress,
+            repair_hint=lambda exc: str(exc) if useful and type(exc) is ValueError else "",
         )
         # Recheck snapshot integrity and version dependencies after an external call.
         try:
@@ -198,8 +264,15 @@ class ForecastService:
             if assisted and now() >= event.question.window_start:
                 raise Conflict("预测提交时窗口已开始；保留输入，须重新分析，不回填未来预测")
             result = Forecast(
-                schema_version="2.0" if assisted else "1.0",
+                schema_version="2.2"
+                if case_reference
+                else "2.1"
+                if reference_binding
+                else "2.0"
+                if assisted
+                else "1.0",
                 session_id=sid,
+                reference_binding=reference_binding,
                 event=event,
                 assessment=assessment,
                 spec=spec,
@@ -240,14 +313,55 @@ class ForecastService:
             return self.get(step.forecast_id)
         if self.provider is None:
             raise AppError("未配置模型服务")
+        useful = step.method_version in {
+            "judgment-2.1",
+            "judgment-reference-1.1",
+            "judgment-reference-1.0",
+            "judgment-case-reference-1.0",
+        }
+        case_reference = step.reference_binding is not None and isinstance(
+            step.reference_binding.estimate, CaseEstimate
+        )
+        bayesian_reference = (
+            step.reference_binding is not None
+            and step.reference_binding.estimate.method_version == "release-reference-1.2"
+        )
         if (
             step.model_id != self.provider.model_id
             or step.structured_mode != self.provider.structured_mode
             or step.output_token_limit != self.provider.output_token_limit
             or step.prompt_version
-            != (JUDGMENT_VERSION if step.spec.guidance else FORECAST_PROMPT_VERSION)
+            != (
+                (
+                    "forecast-case-reference-1.0"
+                    if case_reference
+                    else "forecast-reference-1.1"
+                    if bayesian_reference
+                    else "forecast-reference-1.0"
+                    if step.reference_binding
+                    else USEFUL_JUDGMENT_VERSION
+                    if useful
+                    else JUDGMENT_VERSION
+                )
+                if step.spec.guidance
+                else FORECAST_PROMPT_VERSION
+            )
             or step.method_version
-            != ("judgment-2.0" if step.spec.guidance else FORECAST_METHOD_VERSION)
+            != (
+                (
+                    "judgment-case-reference-1.0"
+                    if case_reference
+                    else "judgment-reference-1.1"
+                    if bayesian_reference
+                    else "judgment-reference-1.0"
+                    if step.reference_binding
+                    else "judgment-2.1"
+                    if useful
+                    else "judgment-2.0"
+                )
+                if step.spec.guidance
+                else FORECAST_METHOD_VERSION
+            )
         ):
             raise Conflict("模型、提示词、方法或计算配置已变化，不能恢复旧步骤")
         session = self.sessions.load(step.session_id)
@@ -269,6 +383,7 @@ class ForecastService:
             step.spec,
             numeric=step.numeric,
             _step=step,
+            reference_binding=step.reference_binding,
         )
 
     def cancel(self, step_id: UUID) -> ForecastStep:

@@ -25,10 +25,13 @@ def test_initial_alembic_migration_is_real_and_repeatable(repo):
             "resolutions",
             "forecast_steps",
             "evaluation_runs",
+            "historical_datasets",
+            "historical_diagnostics",
+            "historical_case_datasets",
+            "historical_cases",
+            "historical_case_outcomes",
         }
-        assert (
-            connection.scalar(text("select version_num from alembic_version")) == "0006_evaluation"
-        )
+        assert connection.scalar(text("select version_num from alembic_version")) == "0008_cases"
     session = EventService(repo).create("保存原文")
     repo.migrate()
     assert repo.load(session.id).sources[0].raw == "保存原文"

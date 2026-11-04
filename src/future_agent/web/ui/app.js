@@ -114,7 +114,8 @@ function renderList() {
     return;
   }
   const current = state.session && state.session.id;
-  els.list.innerHTML = state.sessions
+  const queue = state.verificationQueue || [];
+  els.list.innerHTML = (queue.length ? `<p class="section-label">到期待核验 ${queue.length}</p>${queue.map(item => `<button class="session-item" data-session="${esc(item.session_id)}">${esc(item.question)}<small>${esc(fmt(item.window_end))} · ${item.status === "disputed" ? "存在争议" : "待核验"}</small></button>`).join("")}<p class="section-label">全部会话</p>` : "") + state.sessions
     .map((session) => {
       const title = session.question || session.preview || "未命名会话";
       const active = session.id === current;
@@ -151,7 +152,7 @@ function renderNew() {
   els.view.innerHTML = `
     <section class="hero">
       <h2>把一个可核验的未来问题，写成一段事实。</h2>
-      <p>系统会先整理目标与结果定义，再检索公开资料、读取正文、形成判断。概率不会由系统编造；证据不足时它会说明无法判断。</p>
+      <p>系统会先整理目标与结果定义，再检索公开资料、读取正文、形成判断。数值概率是未经独立校准的主观判断；依据不足时会交付方向、条件分析或说明无法判断。</p>
     </section>
     ${errorBanner()}
     <form class="composer" id="composer" autocomplete="off">
@@ -161,7 +162,7 @@ function renderNew() {
           placeholder="例如：到 2026 年 12 月 31 日，某开源项目是否会在 GitHub 上发布 1.0 版本？请写出对象、时间窗口和可核验的结果。">${esc(
             draft,
           )}</textarea>
-        <p class="hint">只写事实和待判断的问题。系统不会把叙述中的私人信息发送给检索服务。⌘/Ctrl + Enter 提交。</p>
+        <p class="hint">只写事实和待判断的问题。模型服务会接收分析所需叙述；检索仅发送你授权的公开查询，请先检查查询是否含私人信息。⌘/Ctrl + Enter 提交。</p>
       </div>
       <div class="form-row">
         <p class="hint">${
@@ -202,7 +203,7 @@ function renderWorking(session) {
       <div class="progress-head"><span class="pulse" aria-hidden="true"></span><span>${esc(
         jobHeadline(job),
       )}</span></div>
-      <button class="button" type="button" data-action="cancel-forecast" id="cancel-forecast" hidden>停止最终判断</button>
+      <button class="button" type="button" data-action="cancel-forecast" id="cancel-forecast" hidden>停止分析</button>
       <ul class="progress-log" id="job-log">${messages || "<li><span>正在排队…</span></li>"}</ul>
     </section>
     <p class="hint">任务在单个本地工作线程中执行；不要关闭这个页面，刷新或重新打开会话会自动重连进度，保存的步骤保留在数据库中。</p>`;
@@ -279,10 +280,10 @@ function renderSession() {
     ${errorBanner()}
     ${missingModel ? '<div class="callout warn"><div class="callout-title">模型服务未配置</div>可以保存原文和查看历史，但无法生成新的分析与判断。配置 LLM_BASE_URL / LLM_API_KEY 后重启服务。</div>' : ""}
     ${status === "FAILED" && session.error_code ? `<div class="callout danger"><div class="callout-title">上次执行失败</div><span class="mono">${esc(session.error_code)}</span></div>` : ""}
-    ${status === "FAILED" || status === "READING" || status === "FORECASTING" ? renderRetry(session) : ""}
+    ${(status === "FAILED" || status === "READING" || status === "FORECASTING" || a.stop_reason?.startsWith("用户已停止") || state.error?.startsWith("已停止")) ? renderRetry(session) : ""}
+    ${forecast ? renderReport(session, forecast) : ""}
     ${renderSource(session)}
     ${renderStage(session, a, forecast)}
-    ${forecast ? renderReport(session, forecast) : ""}
     ${forecast && !forecast.frozen ? renderFreeze(forecast) : ""}
     ${forecast && forecast.frozen ? renderLifecycle(session, forecast) : ""}
     ${renderFooter(session, forecast)}`;
@@ -577,7 +578,12 @@ function renderReport(session, forecast) {
       <h3>判断</h3>
       <span class="hint">${esc(forecast.delivery_label)} · ${esc(forecast.calibration_status || "未校准")}</span>
     </div>
+    ${forecast.historical_reference ? `<div class="callout info"><strong>历史参照</strong><p>${esc(forecast.historical_reference.reason)}</p>${forecast.historical_reference.status === "computed" ? `<p>过去12个完整30天窗口：${esc(forecast.historical_reference.numerator)}/${esc(forecast.historical_reference.denominator)}，观察频率 ${esc((forecast.historical_reference.frequency * 100).toFixed(1))}%（不是未来概率）</p>` : ""}${forecast.historical_reference.method_version === "case-reference-1.0" ? `<p>定性案例，不提供统计概率；历史事实重建，未经人工独立批准。</p>${(forecast.historical_reference.cases || []).map(c => `<p><strong>${esc(c.key)}</strong> ${esc(c.question)}<br>历史结果：${esc(c.outcome)}<br>${c.source_urls.map(u => esc(u)).join("；")}</p>`).join("")}` : ""}</div>` : ""}
+    ${forecast.historical_reference?.bayesian_estimate ? `<div class="callout info"><p>贝叶斯统计参照：${esc((forecast.historical_reference.bayesian_estimate.predictive_probability * 100).toFixed(1))}%（模型假设下的估计，未经独立校准）</p><p>固定先验 Beta(1,1)；计算 (${esc(forecast.historical_reference.bayesian_estimate.successes)}+1)/(${esc(forecast.historical_reference.bayesian_estimate.trials)}+2)。假设窗口条件独立且发生机制稳定，不自动替代最终判断。</p></div>` : ""}
     <p class="conclusion">${esc(forecast.conclusion || "（没有给出结论）")}</p>
+    <div class="callout info"><p>关键依据：${esc(forecast.key_drivers?.[0] || forecast.reference_basis || "未提供")}</p>
+    <p>主要未知：${esc(forecast.unknown_effects?.[0] || "未记录关键未知，不代表没有不确定性")}</p>
+    <p>改判条件：${esc(forecast.change_conditions?.[0] || "未提供")}</p></div>
     ${forecast.no_numeric_reason ? `<div class="callout info" style="margin-top:12px"><div class="callout-title">没有数值概率</div>${esc(forecast.no_numeric_reason)}</div>` : ""}
     ${
       forecast.refusal_reason
@@ -598,6 +604,7 @@ function renderReport(session, forecast) {
     }
     ${forecast.key_drivers?.length ? `<details><summary>关键驱动 ${forecast.key_drivers.length} 项</summary><div class="details-body">${list(forecast.key_drivers)}</div></details>` : ""}
     ${forecast.unknown_effects?.length ? `<details><summary>未知影响 ${forecast.unknown_effects.length} 项</summary><div class="details-body">${list(forecast.unknown_effects)}</div></details>` : ""}
+    ${forecast.decision_review ? `<div class="callout"><p>判断边界：${esc(forecast.decision_review.synthesis_reason)}</p><p>最强反面解释：${esc(forecast.decision_review.strongest_counterargument)}</p>${forecast.decision_review.conditional_factors?.length ? list(forecast.decision_review.conditional_factors) : ""}</div>` : ""}
     ${forecast.change_conditions?.length ? `<details><summary>结论改变条件</summary><div class="details-body">${list(forecast.change_conditions)}</div></details>` : ""}
     ${forecast.limitations?.length ? `<details><summary>局限与缺口 ${forecast.limitations.length} 项</summary><div class="details-body">${list(forecast.limitations)}</div></details>` : ""}
     ${forecast.assumptions?.length ? `<details><summary>假设</summary><div class="details-body">${list(forecast.assumptions)}</div></details>` : ""}
@@ -788,7 +795,15 @@ function updateJobPanel(job) {
   const panel = document.getElementById("job-panel");
   if (!panel || !job) return;
   const stop = document.getElementById("cancel-forecast");
-  if (stop) stop.hidden = job.session_status !== "FORECASTING";
+  if (stop) {
+    stop.hidden = !["prepare", "retry", "execute", "answer", "authorize"].includes(job.kind);
+    stop.disabled = !!job.stop_requested;
+    stop.textContent = job.stop_requested ? "已请求停止 · 等待当前请求返回" : "停止分析";
+  }
+  let metrics = document.getElementById("job-metrics");
+  if (!metrics) { metrics = document.createElement("p"); metrics.id = "job-metrics"; panel.append(metrics); }
+  const m = job.metrics;
+  if (m) metrics.textContent = `已取得正文 ${job.documents_read || 0} 份 · 剩余调用 ${Math.max(0, m.max_calls - m.calls_used)} 次 · 记录剩余时间 ${Math.max(0, Math.round(m.max_run_seconds - m.consumed_seconds))} 秒（进行中的调用可能已预留）${job.gaps?.length ? " · 缺口：" + job.gaps.join("；") : ""}`;
   const head = panel.querySelector(".progress-head span:last-child");
   if (head) head.textContent = jobHeadline(job);
   const log = document.getElementById("job-log");
@@ -820,6 +835,7 @@ function clearError() {
 
 async function loadSessions() {
   const data = await api("/api/sessions");
+  state.verificationQueue = data.verification_queue || [];
   state.sessions = data.sessions || [];
   renderList();
 }
@@ -1015,7 +1031,7 @@ els.view.addEventListener("click", (event) => {
   const action = button.dataset.action;
   if (action === "cancel-forecast") {
     button.disabled = true;
-    api(`/api/sessions/${sessionId()}/cancel-forecast`, { method: "POST" })
+    api(`/api/sessions/${sessionId()}/stop`, { method: "POST" })
       .then((data) => { button.textContent = data.message; })
       .catch((error) => { button.disabled = false; button.textContent = error.message; });
     return;

@@ -334,8 +334,7 @@ def test_upgrade_preserves_m1_and_refuses_downgrade(tmp_path):
         repo.migrate()
         with repo.engine.begin() as connection:
             assert (
-                connection.scalar(text("select version_num from alembic_version"))
-                == "0006_evaluation"
+                connection.scalar(text("select version_num from alembic_version")) == "0008_cases"
             )
             config.attributes["connection"] = connection
             with pytest.raises(RuntimeError, match="不可无损回退"):

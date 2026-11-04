@@ -203,6 +203,7 @@ class ResearchService:
         planned: SearchPlan | None = None,
         page_limit: int | None = None,
         seconds_limit: float | None = None,
+        progress: Callable[[str], None] = lambda _: None,
     ) -> ResearchRun:
         session = self.sessions.load(sid)
         if session.status in {"READING", "FORECASTING"} or any(
@@ -243,6 +244,7 @@ class ResearchService:
             # Search both directions before reading pages, so pages cannot starve counterevidence.
             groups = []
             for query in plan.queries:
+                progress("正在查询公开资料。")
                 try:
                     reply = self._call(
                         sid,
@@ -298,6 +300,7 @@ class ResearchService:
                 hosts.add(host)
             candidates = diverse + remaining
             for page_index, candidate in enumerate(candidates):
+                progress(f"正在读取第{page_index + 1}个候选页面。")
                 if page_limit is not None and page_index >= page_limit:
                     self._gap(sid, run.id, "stage_page_limit")
                     break

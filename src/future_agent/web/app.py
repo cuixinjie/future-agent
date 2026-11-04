@@ -13,13 +13,14 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError
 
 from future_agent.application.assistance import AssistanceService
+from future_agent.application.network import NetworkError
 from future_agent.application.ports import AppError, Conflict, NotFound
 from future_agent.config import Settings
 from future_agent.domain.assistance import AssistanceState
 from future_agent.domain.lifecycle import ResolutionInput
 from future_agent.web.jobs import Job, JobRunner, job_view
 from future_agent.web.services import WebServices, build_services
-from future_agent.web.views import overview, session_detail, session_summary
+from future_agent.web.views import overview, session_detail, session_summary, verification_queue
 
 UI_DIR = Path(__file__).parent / "ui"
 MAX_BODY_BYTES = 256 * 1024
@@ -65,7 +66,16 @@ class WebApplication:
     ) -> Job:
         if self.runner.active(session_id) is not None:
             raise Conflict("该会话已有执行中的任务；请等待完成")
-        return self.runner.submit(kind, session_id, work)
+
+        def guarded(emit: Callable[[str], None]) -> dict[str, Any]:
+            try:
+                return work(emit)
+            except NetworkError as exc:
+                if exc.code == "cancelled":
+                    self.assistance.record_stop(session_id)
+                raise
+
+        return self.runner.submit(kind, session_id, guarded)
 
     def prepare(self, session_id: UUID) -> Job:
         def work(emit: Callable[[str], None]) -> dict[str, Any]:
@@ -113,7 +123,7 @@ class WebApplication:
 
     def authorize(self, session_id: UUID, *, approved: bool, allow_search: bool) -> Job:
         def work(emit: Callable[[str], None]) -> dict[str, Any]:
-            self.assistance.authorize_followup(session_id, approved)
+            self.assistance.authorize_followup(session_id, approved, progress=emit)
             return self._drive(session_id, allow_search, emit)
 
         return self.start_job("authorize", session_id, work)
@@ -271,7 +281,15 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] == "sessions":
                 if method == "GET":
                     sessions = application.services.events.list_sessions()
-                    return self.send_json(200, {"sessions": [session_summary(s) for s in sessions]})
+                    return self.send_json(
+                        200,
+                        {
+                            "sessions": [session_summary(s) for s in sessions],
+                            "verification_queue": verification_queue(
+                                application.services, sessions
+                            ),
+                        },
+                    )
                 if method == "POST":
                     return self.create_session(application)
             if len(parts) == 3 and parts[1] == "sessions":
@@ -351,6 +369,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(201, {"session": session_detail(application.services, session.id)})
 
     def session_action(self, application: WebApplication, session_id: UUID, action: str) -> None:
+        if action == "stop":
+            job = application.runner.active(session_id)
+            if job is None or job.kind not in {
+                "prepare",
+                "retry",
+                "execute",
+                "answer",
+                "authorize",
+            }:
+                raise Conflict("当前没有可停止的分析任务")
+            job.stop_requested.set()
+            session = application.services.events.get(session_id)
+            if session.status == "FORECASTING" and session.active_forecast_step_id:
+                application.services.forecasts.cancel(session.active_forecast_step_id)
+            return self.send_json(
+                200, {"message": "已请求停止；等待当前请求返回。费用仍可能产生。"}
+            )
         if action == "cancel-forecast":
             session = application.services.events.get(session_id)
             if session.status != "FORECASTING" or not session.active_forecast_step_id:
@@ -429,6 +464,20 @@ class Handler(BaseHTTPRequestHandler):
             payload["job"]["session_status"] = self.application.services.events.get(
                 job.session_id
             ).status
+        if job.session_id is not None:
+            detail = session_detail(self.application.services, job.session_id)
+            payload["job"]["metrics"] = detail["assistance"].get("budgets", {})
+            payload["job"]["documents_read"] = (
+                0
+                if not detail["current_revision"]
+                else sum(
+                    d.source.access_status == "read_success"
+                    for d in self.application.services.evidence.list_documents(
+                        job.session_id, detail["current_revision"]
+                    )
+                )
+            )
+            payload["job"]["gaps"] = detail["assistance"].get("research_gaps", [])[-3:]
         if job.session_id is not None and job.status in {"done", "failed"}:
             try:
                 payload["session"] = session_detail(self.application.services, job.session_id)

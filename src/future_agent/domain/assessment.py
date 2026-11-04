@@ -30,6 +30,7 @@ class AssessmentReview(Contract):
     evidence: list[ReviewedEvidence] = Field(default_factory=list)
     critical_questions: list[Text] = Field(default_factory=list, max_length=3)
     limitations: list[Text] = Field(default_factory=list)
+    defer_delivery_choice: bool = Field(default=False, exclude_if=lambda value: not value)
     allow_numeric: bool = False
     numeric_basis: NumericBasis | None = Field(default=None, exclude_if=lambda value: value is None)
     review_origin: Literal["model"] | None = Field(
@@ -104,6 +105,7 @@ class EvidenceAssessment(Contract):
         "evidence-assessor-1.1",
         "evidence-assessor-1.2",
         "evidence-assessor-2.0",
+        "evidence-assessor-2.1",
     ] = ASSESSOR_VERSION
     input_hash: Text
     review: AssessmentReview
@@ -123,6 +125,12 @@ class EvidenceAssessment(Contract):
 
     @model_validator(mode="after")
     def valid_methods(self) -> Self:
+        if self.review.defer_delivery_choice != (self.assessor_version == "evidence-assessor-2.1"):
+            raise ValueError("交付选择策略与评估版本不一致")
+        if self.review.defer_delivery_choice and (
+            self.experiment or self.review.numeric_basis is None
+        ):
+            raise ValueError("最终交付策略仅用于新版普通依据评估")
         expected = [m.method for m in self.methods if m.data_eligible and m.implemented]
         if self.available_methods != expected:
             raise ValueError("可用方法必须是数据资格与已实现能力的交集")

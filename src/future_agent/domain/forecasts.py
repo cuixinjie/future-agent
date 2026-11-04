@@ -1,6 +1,7 @@
 """Reviewed outcome definitions and validated, explicitly uncalibrated forecasts."""
 
 import math
+import re
 from typing import Annotated, Literal, Self
 from uuid import UUID, uuid4
 
@@ -8,9 +9,11 @@ from pydantic import Field, model_validator
 
 from future_agent.domain.assessment import EvidenceAssessment
 from future_agent.domain.assistance import AnalysisPlan, JudgmentSummary
+from future_agent.domain.case_reference import CaseEstimate
 from future_agent.domain.contracts import Contract, Text, UtcTime, now
 from future_agent.domain.events import EventRevision
 from future_agent.domain.evidence import EvidenceDocument, EvidenceSpan
+from future_agent.domain.reference import ReferenceBinding
 
 FORECAST_METHOD_VERSION = "judgment-1.0"
 PROBABILITY_TOLERANCE = 1e-6
@@ -56,15 +59,24 @@ class OutcomeJudgment(Contract):
     watch_signals: list[Text] = Field(min_length=1)
 
 
+class DecisionReview(Contract):
+    strongest_counterargument: Text
+    synthesis_reason: Text
+    conditional_factors: list[Text] = Field(default_factory=list, max_length=5)
+
+
 class ForecastDraft(Contract):
     schema_version: Literal["1.0", "2.0"] = "1.0"
     outcomes: list[OutcomeJudgment] = Field(min_length=2, max_length=12)
     assumptions: list[Text]
+    decision_review: DecisionReview | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     refusal_reason: Text | None = None
     judgment: JudgmentSummary | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
-def forecast_schema(*, assisted: bool = False) -> dict:
+def forecast_schema(*, assisted: bool = False, useful: bool = False) -> dict:
     schema = ForecastDraft.model_json_schema()
     version = "2.0" if assisted else "1.0"
     schema["properties"]["schema_version"] = {
@@ -73,6 +85,11 @@ def forecast_schema(*, assisted: bool = False) -> dict:
         "title": "Schema Version",
         "type": "string",
     }
+    if useful:
+        schema.setdefault("required", []).append("decision_review")
+    else:
+        schema["properties"].pop("decision_review", None)
+        schema.get("$defs", {}).pop("DecisionReview", None)
     if not assisted:
         schema["properties"].pop("judgment", None)
         schema.get("$defs", {}).pop("JudgmentSummary", None)
@@ -80,7 +97,8 @@ def forecast_schema(*, assisted: bool = False) -> dict:
 
 
 class Forecast(Contract):
-    schema_version: Literal["1.0", "2.0"] = "1.0"
+    reference_binding: ReferenceBinding | None = Field(default=None, exclude_if=lambda v: v is None)
+    schema_version: Literal["1.0", "2.0", "2.1", "2.2"] = "1.0"
     id: UUID = Field(default_factory=uuid4)
     run_id: UUID = Field(default_factory=uuid4)
     session_id: UUID
@@ -88,7 +106,14 @@ class Forecast(Contract):
     assessment: EvidenceAssessment
     spec: ForecastSpec
     method: Literal["scenario_only", "llm_judgment"]
-    method_version: Literal["judgment-1.0", "judgment-2.0"] = FORECAST_METHOD_VERSION
+    method_version: Literal[
+        "judgment-1.0",
+        "judgment-2.0",
+        "judgment-2.1",
+        "judgment-reference-1.0",
+        "judgment-reference-1.1",
+        "judgment-case-reference-1.0",
+    ] = FORECAST_METHOD_VERSION
     calibration_status: Literal["not_applicable", "uncalibrated"]
     model_id: Text
     prompt_version: Text
@@ -119,6 +144,35 @@ class Forecast(Contract):
             or self.method not in self.assessment.available_methods
         ):
             raise ValueError("预测必须绑定事件、评估与截止版本")
+        if (
+            self.method_version
+            in {"judgment-reference-1.0", "judgment-reference-1.1", "judgment-case-reference-1.0"}
+        ) != (self.reference_binding is not None):
+            raise ValueError("参照方法必须绑定封存输入")
+        if self.reference_binding is not None:
+            b = self.reference_binding
+            if (self.method_version == "judgment-case-reference-1.0") != isinstance(
+                b.estimate, CaseEstimate
+            ):
+                raise ValueError("案例参照与发布参照不得混用方法版本")
+            if (self.method_version == "judgment-reference-1.1") != (
+                b.estimate.method_version == "release-reference-1.2"
+            ):
+                raise ValueError("贝叶斯参照必须绑定对应预测方法版本")
+            if (
+                self.method_version == "judgment-reference-1.1"
+                and self.prompt_version != "forecast-reference-1.1"
+            ):
+                raise ValueError("贝叶斯参照必须绑定对应提示词版本")
+            if (
+                b.event_revision_id != self.event.id
+                or b.estimate.cutoff != self.evidence_cutoff
+                or b.estimate.window_start != self.event.question.window_start
+                or b.estimate.window_end != self.event.question.window_end
+                or self.spec.guidance is None
+                or b.estimate.target != self.spec.guidance.reference_target
+            ):
+                raise ValueError("参照绑定必须属于当前事件与截止")
         reviewed = {r.span_id for r in self.assessment.review.evidence}
         documents = {d.id: d for d in self.evidence_documents}
         eligible = {e.document_id for e in self.assessment.eligibility if e.eligible}
@@ -142,19 +196,51 @@ class Forecast(Contract):
         expected, original = validate_judgment(
             self.draft, self.spec, self.method, {s.id for s in self.evidence_spans}
         )
-        if (self.method_version == "judgment-2.0") != (self.spec.guidance is not None):
+        if (
+            self.method_version
+            in {
+                "judgment-2.0",
+                "judgment-2.1",
+                "judgment-reference-1.0",
+                "judgment-reference-1.1",
+                "judgment-case-reference-1.0",
+            }
+        ) != (self.spec.guidance is not None):
             raise ValueError("预测方法版本与交付契约不一致")
-        if self.schema_version != self.spec.schema_version:
+        if self.schema_version != (
+            "2.2"
+            if self.method_version == "judgment-case-reference-1.0"
+            else "2.1"
+            if self.reference_binding
+            else self.spec.schema_version
+        ):
             raise ValueError("预测版本与结果定义版本不一致")
         if self.spec.guidance:
-            if (
-                self.assessment.experiment
-                or self.assessment.assessor_version != "evidence-assessor-2.0"
-            ):
+            if self.assessment.experiment or self.assessment.assessor_version not in {
+                "evidence-assessor-2.0",
+                "evidence-assessor-2.1",
+            }:
                 raise ValueError("普通新版判断必须使用新版普通评估")
             for name in ("question", "outcome_type", "resolution_rule", "resolution_source_policy"):
                 if getattr(self.spec.guidance, name) != getattr(self.event.question, name):
                     raise ValueError("目标建议与实际冻结问题不一致")
+        if (
+            self.method_version
+            in {
+                "judgment-2.1",
+                "judgment-reference-1.0",
+                "judgment-reference-1.1",
+                "judgment-case-reference-1.0",
+            }
+        ) != (self.assessment.assessor_version == "evidence-assessor-2.1"):
+            raise ValueError("最终交付审查必须绑定对应评估版本")
+        if self.method_version in {
+            "judgment-2.1",
+            "judgment-reference-1.0",
+            "judgment-reference-1.1",
+            "judgment-case-reference-1.0",
+        }:
+            validate_decision_review(self.draft, self.spec)
         if self.probabilities != expected or self.normalization_original_sum != original:
             raise ValueError("报告概率必须来自已校验预测，归一化须留痕")
         calibration = "uncalibrated" if self.method == "llm_judgment" else "not_applicable"
@@ -224,3 +310,47 @@ def validate_judgment(
         if total != 1:
             return [p / total for p in numbers], total
     return values, None
+
+
+def validate_decision_review(draft: ForecastDraft, spec: ForecastSpec) -> None:
+    """Validate new generation only; old frozen forecasts retain their original rules.
+
+    These checks enforce structure and explicit contradictions, not semantic truth.
+    """
+    review, summary = draft.decision_review, draft.judgment
+    if review is None or summary is None:
+        raise ValueError("最终判断必须包含反面解释与交付依据审查")
+    if summary.delivery == "conditional":
+        factors = [f.strip() for f in review.conditional_factors]
+        if len(set(factors)) < 2:
+            raise ValueError("条件分析须列出至少两个不同的驱动分支条件")
+        definitions = {o.definition.strip() for o in spec.outcomes}
+        if any(f.strip() in definitions for f in factors):
+            raise ValueError("分支条件不能重复结果定义")
+        if re.search(r"(?:默认(?:分支|选择)|首选结果)(?:为|是)", summary.conclusion):
+            raise ValueError("存在总体首选时应交付方向判断，不能冒充条件分析")
+    elif review.conditional_factors:
+        raise ValueError("非条件分析不得混入条件分支清单")
+    texts = [
+        summary.conclusion,
+        summary.reference_basis,
+        summary.differences_and_adjustment,
+        summary.no_numeric_reason or "",
+        draft.refusal_reason or "",
+        *summary.key_drivers,
+        *summary.unknown_effects,
+        *summary.change_conditions,
+        review.strongest_counterargument,
+        review.synthesis_reason,
+        *review.conditional_factors,
+        *(o.reasoning for o in draft.outcomes),
+        *(t for o in draft.outcomes for t in [*o.conditions, *o.watch_signals]),
+    ]
+    if any(
+        re.search(
+            r"(?<![A-Za-z0-9_])(?:scenario_only|reviewed_evidence|UUID|conditional_only)(?![A-Za-z0-9_])",
+            t,
+        )
+        for t in texts
+    ):
+        raise ValueError("用户判断须用自然语言解释依据，不得暴露内部资格字段")

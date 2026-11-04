@@ -69,6 +69,11 @@ class ReportExportService:
                 if document.id == span.document_id
             ],
         }
+        if forecast.reference_binding is not None:
+            result["schema_version"] = (
+                "1.3" if forecast.method_version == "judgment-case-reference-1.0" else "1.2"
+            )
+            result["historical_reference"] = forecast.reference_binding.model_dump(mode="json")
         report = self.lifecycle.report(forecast_id)
         # Preserve the existing report's layout and treat all its external text as literal.
         fence = "`" * max(3, 1 + max((len(s) for s in re.findall(r"`+", report)), default=0))

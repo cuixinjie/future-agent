@@ -47,6 +47,18 @@ class ResolutionService:
         except NotFound:
             return None
 
+    def needs_verification(self, forecast_id: UUID) -> bool:
+        frozen = self.frozen(forecast_id)
+        if frozen is None:
+            return False
+        question = frozen.forecast.event.question
+        history = self.history(forecast_id)
+        return bool(
+            question
+            and question.window_end <= now()
+            and (not history or history[-1].status not in {"resolved", "void"})
+        )
+
     def freeze(
         self,
         forecast_id: UUID,

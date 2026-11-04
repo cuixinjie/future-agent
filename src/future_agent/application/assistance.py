@@ -12,8 +12,9 @@ from future_agent.application.assessment import AssessmentService
 from future_agent.application.events import EventService
 from future_agent.application.forecasts import ForecastService
 from future_agent.application.model_calls import ModelCalls
-from future_agent.application.passage_selection import select_excerpt
+from future_agent.application.passage_selection import select_excerpts
 from future_agent.application.ports import AppError, Conflict, NotFound
+from future_agent.application.reference import ReferenceService
 from future_agent.application.research import ResearchService
 from future_agent.domain.assessment import AssessmentReview, ReviewedEvidence
 from future_agent.domain.assistance import (
@@ -23,16 +24,25 @@ from future_agent.domain.assistance import (
     PlannedQuery,
 )
 from future_agent.domain.contracts import Contract, now
-from future_agent.domain.events import EventDraft, ForecastQuestion, transition
+from future_agent.domain.events import AnalysisSession, EventDraft, ForecastQuestion, transition
 from future_agent.domain.evidence import EvidenceSpan
 from future_agent.domain.forecasts import Forecast, ForecastSpec, OutcomeDefinition
 from future_agent.domain.research import PUBLIC_QUERY_RULES, SearchPlan, SearchQuery, public_terms
 from future_agent.prompts.assistance import (
+    CASE_PLAN_SYSTEM,
     PLAN_SYSTEM,
     PLAN_VERSION,
     READING_SYSTEM,
     READING_VERSION,
+    REFERENCE_PLAN_SYSTEM,
 )
+
+
+def research_page_limit(session: AnalysisSession, round_index: int) -> int:
+    used = sum(a.kind == "page" for run in session.research_runs for a in run.attempts)
+    remaining = max(0, session.max_pages - used)
+    return min(6, remaining // 2 if round_index == 0 and remaining > 1 else remaining)
+
 
 T = TypeVar("T", bound=Contract)
 MAX_BODY_CHARS = 24000
@@ -117,6 +127,7 @@ class AssistanceService:
         research: ResearchService,
         assessments: AssessmentService,
         forecasts: ForecastService,
+        references: ReferenceService | None = None,
     ) -> None:
         self.events, self.research, self.assessments, self.forecasts = (
             events,
@@ -124,10 +135,14 @@ class AssistanceService:
             assessments,
             forecasts,
         )
+        self.references = references
         self.sessions, self.evidence = events.repository, assessments.evidence
 
     def state(self, sid: UUID) -> AssistanceState:
         return self.sessions.load(sid).assistance or AssistanceState()
+
+    def record_stop(self, sid: UUID) -> None:
+        self._save(sid, stop_reason="用户已停止分析；已消耗预算保留")
 
     def _save(self, sid: UUID, **changes) -> AssistanceState:
         session = self.sessions.load(sid)
@@ -171,12 +186,15 @@ class AssistanceService:
             repair_hint=lambda exc: plan_repair_hint(exc, contract),
         )
         self.sessions.save(transition(active, "NEEDS_INPUT"), active.version)
+        progress("模型步骤已结束。")
         return result
 
     def prepare(
         self, sid: UUID, *, progress: Callable[[str], None] = lambda _: None
     ) -> AssistanceState:
         session, state = self.sessions.load(sid), self.state(sid)
+        if state.stop_reason and state.stop_reason.startswith("用户已停止"):
+            state = self._save(sid, stop_reason=None)
         if (
             state.plan
             and state.model_id
@@ -199,6 +217,8 @@ class AssistanceService:
             sid,
             stage="planning",
             plan=None,
+            reference_binding=None,
+            reference_preview=None,
             reading=None,
             reading_version=None,
             forecast_id=None,
@@ -245,8 +265,8 @@ class AssistanceService:
         progress("正在拟定预测目标和研究计划。")
         plan = self._generate(
             sid,
-            PLAN_SYSTEM,
-            PLAN_VERSION,
+            PLAN_SYSTEM + (REFERENCE_PLAN_SYSTEM + CASE_PLAN_SYSTEM if self.references else ""),
+            "analysis-plan-reference-1.1" if self.references else PLAN_VERSION,
             {
                 "sources": [s.model_dump(mode="json") for s in session.sources],
                 "event": event.model_dump(mode="json"),
@@ -361,7 +381,12 @@ class AssistanceService:
         return revision
 
     def _research(
-        self, sid: UUID, indexes: list[int], *, queries: list[PlannedQuery] | None = None
+        self,
+        sid: UUID,
+        indexes: list[int],
+        *,
+        queries: list[PlannedQuery] | None = None,
+        progress: Callable[[str], None] = lambda _: None,
     ) -> None:
         state, event, session = self.state(sid), self.events.revision(sid), self.sessions.load(sid)
         if state.research_rounds >= 2:
@@ -375,6 +400,9 @@ class AssistanceService:
             self._save(
                 sid, research_gaps=[*state.research_gaps, "研究停止：为证据分析与预测保留预算"]
             )
+            return
+        if research_page_limit(session, state.research_rounds) == 0:
+            self._save(sid, research_gaps=[*state.research_gaps, "页面预算已耗尽，无法继续研究"])
             return
         self._save(sid, stage="researching", research_rounds=state.research_rounds + 1)
         run = self.research.start(
@@ -390,21 +418,25 @@ class AssistanceService:
                 queries=[SearchQuery(query=q.query, purpose=q.purpose) for q in queries],
                 skipped=[],
             ),
-            page_limit=6,
+            page_limit=research_page_limit(session, state.research_rounds),
+            progress=progress,
             seconds_limit=min(120, remaining - 120),
         )
+        progress("本轮研究已结束。")
         self._save(
             sid, stage="reviewing", research_gaps=[*self.state(sid).research_gaps, *run.gaps]
         )
 
-    def authorize_followup(self, sid: UUID, approved: bool) -> None:
+    def authorize_followup(
+        self, sid: UUID, approved: bool, *, progress: Callable[[str], None] = lambda _: None
+    ) -> None:
         state = self.state(sid)
         if state.stage != "search_authorization" or not state.pending_queries:
             raise Conflict("没有待授权的补充查询")
         queries = state.pending_queries
         if approved:
             self._save(sid, approved_queries=[*state.approved_queries, *(q.query for q in queries)])
-            self._research(sid, [], queries=queries)
+            self._research(sid, [], queries=queries, progress=progress)
             current = self.state(sid)
             reading = (
                 None
@@ -458,16 +490,15 @@ class AssistanceService:
             if take <= 0:
                 truncated = True
                 break
-            start, excerpt = select_excerpt(text, target, take)
+            passages = select_excerpts(text, target, take)
             bodies[doc.id] = {
                 "document_id": str(doc.id),
                 "url": doc.source.url,
-                "body": excerpt,
-                "body_start": start,
+                "passages": [{"body_start": start, "body": body} for start, body in passages],
                 "truncated": len(text) > take,
             }
             truncated |= len(text) > take
-            remaining -= len(excerpt)
+            remaining -= sum(len(body) for _, body in passages)
         self._save(sid, stage="reviewing")
 
         def validate(value: EvidenceReading) -> None:
@@ -475,10 +506,16 @@ class AssistanceService:
                 state.clarification_used or any(q.kind != "private_fact" for q in value.questions)
             ):
                 raise ValueError("研究后仅允许使用剩余额度询问私人事实")
+            for group in value.source_relationships:
+                if len(set(group.document_ids)) < 2 or not set(group.document_ids) <= set(bodies):
+                    raise ValueError("来源关系必须引用至少两份本次可见文档")
             seen = set()
             for citation in value.citations:
                 document = bodies.get(citation.document_id)
-                if document is None or document["body"].count(citation.quote) != 1:
+                if (
+                    document is None
+                    or sum(p["body"].count(citation.quote) for p in document["passages"]) != 1
+                ):
                     raise ValueError("引用必须来自本次可见正文且精确唯一")
                 if (
                     self.evidence.snapshot(citation.document_id).normalized.count(citation.quote)
@@ -511,6 +548,7 @@ class AssistanceService:
                 if value.numeric_basis.source_kind == "user_report" and not event.claims:
                     raise ValueError("用户依据必须有原文陈述")
 
+        progress(f"已选取{len(bodies)}份正文；正在检查来源关系、目标覆盖和引用。")
         reading = self._generate(
             sid,
             READING_SYSTEM,
@@ -524,16 +562,22 @@ class AssistanceService:
                     state.research_rounds == 1 and state.approved_queries
                 ),
                 "research_gaps": state.research_gaps,
+                "historical_reference_preview": state.reference_preview.model_dump(mode="json")
+                if state.reference_preview
+                else None,
                 "clarification_available": not state.clarification_used,
             },
             EvidenceReading,
             validate,
             progress=progress,
         )
-        gaps = [*self.state(sid).research_gaps]
+        gaps = [*self.state(sid).research_gaps, *reading.coverage_gaps]
+        gaps.extend(
+            "模型识别的共同来源（非独立核实）：" + g.basis for g in reading.source_relationships
+        )
         if truncated:
             gaps.append(
-                "正文上下文按目标词项选择片段（每页最多4000/总24000字符），未读部分不作依据；词项匹配不证明相关性"
+                "正文上下文按目标词项选择多个不连续原文片段（每页最多4000/总24000字符），未读部分不作依据；词项匹配不证明相关性"
             )
         self._save(
             sid,
@@ -558,7 +602,15 @@ class AssistanceService:
             completed = [
                 f
                 for f in self.forecasts.history(sid, state.final_revision)
-                if f.method_version == "judgment-2.0" and f.assessment.id == state.assessment_id
+                if f.method_version
+                in {
+                    "judgment-2.0",
+                    "judgment-2.1",
+                    "judgment-reference-1.0",
+                    "judgment-reference-1.1",
+                    "judgment-case-reference-1.0",
+                }
+                and f.assessment.id == state.assessment_id
             ]
             if completed:
                 result = max(completed, key=lambda f: f.created_at)
@@ -574,13 +626,19 @@ class AssistanceService:
             state = self._save(sid, pending_queries=[], reading=None, stage="reviewing")
         if state.stage == "planned":
             revision = self._target(sid, final=False)
+            if self.references:
+                q = self.events.revision(sid).question
+                preview = self.references.check(
+                    state.plan, q.forecast_at, q.window_start, q.window_end
+                )
+                self._save(sid, reference_preview=preview)
             self._save(sid, research_revision=revision)
             queries = state.plan.queries
             approved = [q.query for q in queries] if allow_search else []
             self._save(sid, approved_queries=approved, stage="reviewing")
             if allow_search and queries and self.research.search and self.research.pages:
                 progress("正在搜索并抓取正文；单轮研究最多120秒。")
-                self._research(sid, list(range(min(2, len(queries)))))
+                self._research(sid, list(range(min(2, len(queries)))), progress=progress)
             else:
                 self._save(sid, research_gaps=["本次未联网或未配置搜索；仅使用已有资料与明确假设"])
         state = self.state(sid)
@@ -612,7 +670,7 @@ class AssistanceService:
                 # A resumed run must not reuse the reading from before the follow-up.
                 self._save(sid, reading=None)
                 progress("正在补充搜索并抓取正文；单轮研究最多120秒。")
-                self._research(sid, reading.followup_query_indexes)
+                self._research(sid, reading.followup_query_indexes, progress=progress)
                 reading = self._reading(sid, [], progress=progress)
             current = self.state(sid)
             failed_network = any(
@@ -665,6 +723,13 @@ class AssistanceService:
                         relevance_reason=citation.relevance_reason,
                     )
                 )
+            if self.references:
+                event = self.events.revision(sid)
+                q = event.question
+                binding = self.references.bind(
+                    event.id, self.state(sid).plan, q.forecast_at, q.window_start, q.window_end
+                )
+                self._save(sid, reference_binding=binding)
             assessment = self.assessments.assess(
                 sid,
                 revision,
@@ -676,6 +741,7 @@ class AssistanceService:
                     review_origin="model",
                     evidence=reviewed,
                     numeric_basis=reading.numeric_basis,
+                    defer_delivery_choice=self.state(sid).reading_version == READING_VERSION,
                     allow_numeric=True,
                     limitations=[
                         *self.state(sid).research_gaps,
@@ -727,6 +793,7 @@ class AssistanceService:
             numeric=numeric,
             request_id=request_id,
             progress=progress,
+            reference_binding=state.reference_binding,
         )
         self._save(
             sid, stage="complete", forecast_id=result.id, event_revision=result.event.revision

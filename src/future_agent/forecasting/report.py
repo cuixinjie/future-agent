@@ -66,12 +66,58 @@ def render_report(forecast: Forecast, *, frozen: FrozenForecast | None = None) -
                 "改变判断的条件：" + "；".join(judgment.change_conditions),
             ]
         )
+        if forecast.draft.decision_review:
+            review = forecast.draft.decision_review
+            lead.extend(
+                [
+                    "判断边界：" + review.synthesis_reason,
+                    "最强反面解释：" + review.strongest_counterargument,
+                ]
+            )
+            if review.conditional_factors:
+                lead.append("分支驱动条件：" + "；".join(review.conditional_factors))
         if judgment.no_numeric_reason:
             lead.append("未提供概率：" + judgment.no_numeric_reason)
         if forecast.spec.guidance.action_conditions:
             lead.append("行动/适用条件：" + "；".join(forecast.spec.guidance.action_conditions))
         lead.append("目标默认与假设：" + ("；".join(forecast.spec.guidance.assumptions) or "无"))
         lines = [*lead, "", *lines]
+    if forecast.reference_binding is not None:
+        ref = forecast.reference_binding.estimate
+        lines.extend(["", "历史参照：" + ref.reason])
+        if ref.status == "computed":
+            lines.extend(
+                [
+                    f"历史窗口频率：{ref.numerator}/{ref.denominator} = {ref.frequency:.1%}"
+                    "（观察频率，不是未来概率）",
+                    f"数据集：{ref.dataset_id} / SHA256 {ref.dataset_hash}",
+                    f"历史锚点：{ref.history_anchor}；至目标起点 {ref.anchor_delay_seconds} 秒",
+                    "逐窗口标签：" + str(ref.labels),
+                    "参照来源：" + "；".join(ref.sources),
+                ]
+            )
+        if ref.status == "computed" and ref.bayesian_estimate is not None:
+            posterior = ref.bayesian_estimate
+            lines.extend(
+                [
+                    f"贝叶斯统计参照：({posterior.successes}+1)/({posterior.trials}+2)"
+                    f" = {posterior.predictive_probability:.1%}（模型假设下的估计，未经独立校准）",
+                    f"先验：Beta({posterior.prior_alpha:g}, {posterior.prior_beta:g})；"
+                    f"后验：Beta({posterior.posterior_alpha:g}, {posterior.posterior_beta:g})",
+                ]
+            )
+        lines.extend([*ref.limitations, *ref.excluded])
+        if ref.method_version == "case-reference-1.0":
+            lines.append(f"案例数据集：{ref.dataset_id} / SHA256 {ref.dataset_hash}")
+            for case in ref.cases:
+                lines.extend(
+                    [
+                        f"历史案例 {case.key}：{case.question}",
+                        "事前事实：" + "；".join(case.prior_facts),
+                        f"历史结果：{case.outcome}；可知时间上界：{case.outcome_available_by}",
+                        "案例来源：" + "；".join(case.source_urls),
+                    ]
+                )
     if frozen is not None:
         lines.extend(
             [f"冻结时间：{frozen.frozen_at.isoformat()}", f"冻结内容 SHA256：{frozen.input_hash}"]

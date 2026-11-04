@@ -21,6 +21,7 @@ from future_agent.application.forecasts import ForecastService
 from future_agent.application.lifecycle import ResolutionService
 from future_agent.application.ports import AppError, LLMProvider
 from future_agent.application.protocols import ProtocolService
+from future_agent.application.reference import ReferenceService, ReleaseDataset
 from future_agent.application.report_export import ReportExportService
 from future_agent.application.research import ResearchService, SearchPlanner
 from future_agent.chat import Chat
@@ -36,6 +37,7 @@ from future_agent.providers.compatible import CompatibleProvider
 from future_agent.providers.materials import JsonMaterialImporter
 from future_agent.providers.searxng import SearXNGProvider
 from future_agent.providers.web import StaticPageReader
+from future_agent.storage.reference import SQLiteHistoricalRepository
 from future_agent.storage.reports import FileReportStore
 from future_agent.storage.snapshots import FileSnapshotStore
 from future_agent.storage.sqlite import SQLiteRepository
@@ -68,6 +70,42 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-env", action="store_true", help="不读取 .env（仍读取进程环境变量）")
     parser.add_argument("--data-dir", type=Path, help="批准的本地数据目录")
     commands = parser.add_subparsers(dest="command")
+    reference = commands.add_parser("reference", help="导入/检查不可变历史发布数据集（不调用模型）")
+    reference_ops = reference.add_subparsers(dest="operation", required=True)
+    ref_collect = reference_ops.add_parser("collect")
+    ref_collect.add_argument("repository")
+    ref_collect.add_argument("--product", required=True)
+    ref_collect.add_argument("--channel", required=True)
+    ref_collect.add_argument("--version", required=True)
+    ref_import = reference_ops.add_parser("import")
+    ref_import.add_argument("input", type=Path)
+    case_import = reference_ops.add_parser(
+        "import-cases", help="导入来源可核验的体育/政治小样本案例"
+    )
+    case_import.add_argument("input", type=Path)
+    case_list = reference_ops.add_parser("cases", help="列出案例元数据，不输出结果标签")
+    case_list.add_argument("domain", choices=["sports", "politics"])
+    case_replay = reference_ops.add_parser(
+        "replay-input", help="生成不含目标题答案的历史事实重建输入"
+    )
+    case_replay.add_argument("domain", choices=["sports", "politics"])
+    case_replay.add_argument("key")
+    ref_audit = reference_ops.add_parser("audit", help="只读核验来源分页、字段提取和历史覆盖")
+    ref_audit.add_argument("input", type=Path)
+    ref_check = reference_ops.add_parser("check")
+    ref_check.add_argument("plan", type=Path)
+    ref_check.add_argument("--cutoff", required=True)
+    ref_check.add_argument("--start", required=True)
+    ref_check.add_argument("--end", required=True)
+    diag_import = reference_ops.add_parser("import-questions")
+    diag_import.add_argument("input", type=Path)
+    diag_inputs = reference_ops.add_parser("question-inputs")
+    diag_inputs.add_argument("bundle_id", type=UUID)
+    diag_inputs.add_argument(
+        "--split", choices=["development", "selection", "sealed_test"], required=True
+    )
+    ref_schema = reference_ops.add_parser("schema")
+    ref_schema.add_argument("kind", choices=["dataset", "plan", "questions"])
     chat = commands.add_parser("chat", help="M5 交互式预测助手：会话、审查、报告及核验")
     chat.add_argument("--resume", type=UUID, help="打开已有会话；不自动重发请求")
     chat.add_argument("--manual", action="store_true", help="使用原高级人工审查流程")
@@ -399,6 +437,21 @@ def main() -> int:
         return 0
     repo = provider = None
     try:
+        if args.command == "reference" and args.operation == "audit":
+            from future_agent.domain.reference_quality import audit_release_dataset
+
+            emit(audit_release_dataset(ReleaseDataset.model_validate_json(read_text(args.input))))
+            return 0
+        if args.command == "reference" and args.operation == "schema":
+            from future_agent.domain.assistance import AnalysisPlan
+            from future_agent.domain.historical_questions import DiagnosticBundle
+
+            emit(
+                {"dataset": ReleaseDataset, "plan": AnalysisPlan, "questions": DiagnosticBundle}[
+                    args.kind
+                ].model_json_schema()
+            )
+            return 0
         if args.command == "schema":
             contracts = {
                 "draft": EventDraft,
@@ -454,6 +507,99 @@ def main() -> int:
             return 0
         repo = SQLiteRepository(settings.database_path())
         repo.migrate()
+        if args.command == "reference":
+            from future_agent.application.historical_questions import DiagnosticService
+            from future_agent.domain.assistance import AnalysisPlan
+            from future_agent.domain.historical_questions import DiagnosticBundle
+
+            diagnostic = DiagnosticService(
+                SQLiteHistoricalRepository(repo, FileSnapshotStore(settings.data_dir))
+            )
+            if args.operation == "import-questions":
+                emit(
+                    diagnostic.import_bundle(
+                        DiagnosticBundle.model_validate_json(read_text(args.input))
+                    )
+                )
+                return 0
+            if args.operation == "question-inputs":
+                emit(diagnostic.inputs(args.bundle_id, args.split))
+                return 0
+
+            references = ReferenceService(
+                SQLiteHistoricalRepository(repo, FileSnapshotStore(settings.data_dir))
+            )
+            if args.operation == "import-cases":
+                from future_agent.domain.case_reference import CaseDataset
+
+                saved = references.import_cases(
+                    CaseDataset.model_validate_json(read_text(args.input))
+                )
+                emit(
+                    dict(
+                        id=str(saved.id),
+                        version=saved.version,
+                        domain=saved.domain,
+                        manifest_hash=saved.manifest_hash,
+                        cases=len(saved.cases),
+                        review_origin="program_source_checked",
+                        use="qualitative_only",
+                    )
+                )
+                return 0
+            if args.operation == "cases":
+                emit(references.case_catalog(args.domain))
+                return 0
+            if args.operation == "replay-input":
+                emit(references.replay_input(args.domain, args.key))
+                return 0
+            if args.operation == "collect":
+                from future_agent.domain.reference import ReferenceTarget
+                from future_agent.providers.release_history import collect_releases
+                from future_agent.storage.reference import AcquisitionJournal
+
+                journal = AcquisitionJournal(settings.data_dir)
+                journal.start(args.repository, args.product, args.channel, args.version)
+                try:
+                    collected = collect_releases(
+                        ReferenceTarget(
+                            repository=args.repository,
+                            product=args.product,
+                            channel=args.channel,
+                            definition="github-stable-release-30d-1.0",
+                        ),
+                        args.version,
+                        on_material=journal.record,
+                    )
+                    saved = references.import_dataset(collected)
+                    journal.finish("imported_unreviewed")
+                    emit(
+                        {
+                            "dataset_id": saved.id,
+                            "review_origin": saved.review_origin,
+                            "records": len(saved.history.records),
+                            "journal": str(journal.path),
+                        }
+                    )
+                except BaseException:
+                    journal.finish("failed_or_interrupted")
+                    raise
+            elif args.operation == "import":
+                emit(
+                    references.import_dataset(
+                        ReleaseDataset.model_validate_json(read_text(args.input))
+                    )
+                )
+            else:
+                emit(
+                    references.check(
+                        AnalysisPlan.model_validate_json(read_text(args.plan)),
+                        TypeAdapter(UtcTime).validate_python(args.cutoff),
+                        TypeAdapter(UtcTime).validate_python(args.start),
+                        TypeAdapter(UtcTime).validate_python(args.end),
+                    )
+                )
+            return 0
         if args.command == "chat":
             events = EventService(repo, provider)
             evidence = EvidenceService(repo, repo, FileSnapshotStore(settings.data_dir))
@@ -476,7 +622,17 @@ def main() -> int:
                 ReportExportService(forecasts, lifecycle, FileReportStore(settings.data_dir)),
                 assistance=None
                 if args.manual
-                else AssistanceService(events, research, assessments, forecasts),
+                else AssistanceService(
+                    events,
+                    research,
+                    assessments,
+                    forecasts,
+                    ReferenceService(
+                        SQLiteHistoricalRepository(repo, FileSnapshotStore(settings.data_dir))
+                    )
+                    if settings.historical_reference_enabled
+                    else None,
+                ),
                 create_options={
                     "max_calls": settings.max_llm_calls,
                     "max_run_seconds": settings.max_run_seconds,

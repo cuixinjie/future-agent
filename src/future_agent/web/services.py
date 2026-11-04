@@ -9,12 +9,14 @@ from future_agent.application.evidence import EvidenceService
 from future_agent.application.forecasts import ForecastService
 from future_agent.application.lifecycle import ResolutionService
 from future_agent.application.ports import LLMProvider
+from future_agent.application.reference import ReferenceService
 from future_agent.application.report_export import ReportExportService
 from future_agent.application.research import ResearchService
 from future_agent.config import Settings
 from future_agent.providers.compatible import CompatibleProvider
 from future_agent.providers.searxng import SearXNGProvider
 from future_agent.providers.web import StaticPageReader
+from future_agent.storage.reference import SQLiteHistoricalRepository
 from future_agent.storage.reports import FileReportStore
 from future_agent.storage.snapshots import FileSnapshotStore
 from future_agent.storage.sqlite import SQLiteRepository
@@ -70,6 +72,14 @@ def build_services(settings: Settings) -> WebServices:
         forecasts=forecasts,
         lifecycle=lifecycle,
         research=research,
-        assistance=AssistanceService(events, research, assessments, forecasts),
+        assistance=AssistanceService(
+            events,
+            research,
+            assessments,
+            forecasts,
+            ReferenceService(SQLiteHistoricalRepository(repo, FileSnapshotStore(settings.data_dir)))
+            if settings.historical_reference_enabled
+            else None,
+        ),
         exports=ReportExportService(forecasts, lifecycle, FileReportStore(settings.data_dir)),
     )

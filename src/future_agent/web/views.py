@@ -173,6 +173,8 @@ def reading_view(state: AssistanceState) -> dict[str, Any] | None:
     reading = state.reading
     return {
         "numeric_status": reading.numeric_basis.status,
+        "source_relationships": [g.model_dump(mode="json") for g in reading.source_relationships],
+        "coverage_gaps": reading.coverage_gaps,
         "source_kind": reading.numeric_basis.source_kind,
         "reference": reading.numeric_basis.reference,
         "limitations": reading.numeric_basis.limitations,
@@ -245,11 +247,17 @@ def forecast_view(forecast: Forecast, frozen: FrozenForecast | None) -> dict[str
         "delivery_label": DELIVERY_LABELS.get(
             judgment.delivery if judgment else "scenario_only", "情景分析"
         ),
+        "decision_review": forecast.draft.decision_review.model_dump(mode="json")
+        if forecast.draft.decision_review
+        else None,
         "conclusion": judgment.conclusion if judgment else None,
         "primary_outcome": definitions.get(judgment.primary_outcome)
         if judgment and judgment.primary_outcome
         else None,
         "ranking": [definitions[key] for key in judgment.ranking] if judgment else [],
+        "historical_reference": forecast.reference_binding.estimate.model_dump(mode="json")
+        if forecast.reference_binding
+        else None,
         "reference_basis": judgment.reference_basis if judgment else None,
         "reference_kind": judgment.reference_kind if judgment else None,
         "differences_and_adjustment": judgment.differences_and_adjustment if judgment else None,
@@ -384,3 +392,29 @@ def overview(services: WebServices) -> dict[str, Any]:
         "data_dir": str(settings.data_dir.resolve()),
         "defaults": services.create_options(),
     }
+
+
+def verification_queue(
+    services: WebServices, sessions: list[AnalysisSession]
+) -> list[dict[str, Any]]:
+    items = []
+    for session in sessions:
+        state = session.assistance
+        if not state or not state.forecast_id:
+            continue
+        frozen = services.lifecycle.frozen(state.forecast_id)
+        if frozen is None:
+            continue
+        question = frozen.forecast.event.question
+        history = _load_resolutions(services, state.forecast_id)
+        if not services.lifecycle.needs_verification(state.forecast_id):
+            continue
+        items.append(
+            {
+                "session_id": str(session.id),
+                "question": question.question,
+                "window_end": _iso(question.window_end),
+                "status": history[-1].status if history else "pending",
+            }
+        )
+    return sorted(items, key=lambda item: item["window_end"])

@@ -8,9 +8,11 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from threading import Lock
+from threading import Event, Lock
 from typing import Any, Literal
 from uuid import UUID, uuid4
+
+from future_agent.application.network import NetworkError
 
 JobStatus = Literal["queued", "running", "done", "failed"]
 
@@ -31,6 +33,7 @@ class Job:
     progress: list[dict[str, str]] = field(default_factory=list)
     result: dict[str, Any] | None = None
     error: str | None = None
+    stop_requested: Event = field(default_factory=Event)
 
 
 Work = Callable[[Callable[[str], None]], dict[str, Any]]
@@ -65,10 +68,20 @@ class JobRunner:
             job.status = "running"
         self._append(job, "开始执行。")
         try:
-            result = work(lambda message: self._append(job, message))
+
+            def emit(message: str) -> None:
+                if job.stop_requested.is_set():
+                    raise NetworkError("cancelled")
+                self._append(job, message)
+
+            result = work(emit)
         except Exception as exc:  # surfaced to the UI, never retried automatically
             with self._lock:
-                job.error = str(exc) or exc.__class__.__name__
+                job.error = (
+                    "已停止；已消耗预算保留，恢复请使用重试。"
+                    if job.stop_requested.is_set()
+                    else (str(exc) or exc.__class__.__name__)
+                )
                 job.status = "failed"
         else:
             with self._lock:
@@ -98,6 +111,7 @@ def job_view(job: Job) -> dict[str, Any]:
         "kind": job.kind,
         "session_id": str(job.session_id) if job.session_id else None,
         "status": job.status,
+        "stop_requested": job.stop_requested.is_set(),
         "created_at": job.created_at,
         "progress": list(job.progress),
         "result": job.result,

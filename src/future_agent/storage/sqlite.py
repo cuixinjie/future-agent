@@ -170,6 +170,7 @@ class SQLiteRepository:
                         step.session_id != forecast.session_id
                         or step.revision != forecast.event.revision
                         or step.assessment_id != forecast.assessment.id
+                        or step.reference_binding != forecast.reference_binding
                         or step.spec != forecast.spec
                         or step.model_id != forecast.model_id
                         or step.prompt_version != forecast.prompt_version

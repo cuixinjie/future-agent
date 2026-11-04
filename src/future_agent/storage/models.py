@@ -90,3 +90,46 @@ class EvaluationRunRow(Base):
     id: Mapped[str] = mapped_column(ForeignKey("evaluation_protocols.id"), primary_key=True)
     version: Mapped[int] = mapped_column(Integer)
     payload: Mapped[str] = mapped_column(Text)
+
+
+class HistoricalDatasetRow(Base):
+    __tablename__ = "historical_datasets"
+    __table_args__ = (UniqueConstraint("repository", "product", "channel", "version"),)
+    version: Mapped[str] = mapped_column(String(200))
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    repository: Mapped[str] = mapped_column(String(200), index=True)
+    product: Mapped[str] = mapped_column(String(200))
+    channel: Mapped[str] = mapped_column(String(200))
+    import_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class DiagnosticBundleRow(Base):
+    __tablename__ = "historical_diagnostics"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class CaseDatasetRow(Base):
+    __tablename__ = "historical_case_datasets"
+    __table_args__ = (UniqueConstraint("domain", "version"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    domain: Mapped[str] = mapped_column(String(20), index=True)
+    version: Mapped[str] = mapped_column(String(200))
+    import_hash: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class HistoricalCaseRow(Base):
+    __tablename__ = "historical_cases"
+    __table_args__ = (UniqueConstraint("dataset_id", "case_key"),)
+    id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("historical_case_datasets.id"), index=True)
+    case_key: Mapped[str] = mapped_column(String(100))
+    payload: Mapped[str] = mapped_column(Text)
+
+
+class CaseOutcomeRow(Base):
+    __tablename__ = "historical_case_outcomes"
+    case_id: Mapped[str] = mapped_column(ForeignKey("historical_cases.id"), primary_key=True)
+    payload: Mapped[str] = mapped_column(Text)

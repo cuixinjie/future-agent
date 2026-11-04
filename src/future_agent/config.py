@@ -26,6 +26,7 @@ class Settings(BaseModel):
     max_llm_calls: int = Field(default=12, ge=1, le=100)
     max_run_seconds: float = Field(default=600, gt=0, le=3600)
     max_total_tokens: int = Field(default=1000000, ge=1)
+    historical_reference_enabled: bool = False
     search_provider: Literal["searxng"] = "searxng"
     search_base_url: HttpUrl | None = None
     max_search_queries: int = Field(default=DEFAULT_MAX_SEARCH_QUERIES, ge=1, le=100)
